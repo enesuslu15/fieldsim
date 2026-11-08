@@ -3,6 +3,7 @@ import logging
 
 import pytest
 
+from fieldsim.core.clock import VirtualClock
 from fieldsim.core.engine import GeneratorEngine
 from fieldsim.core.generators import Generator, Ramp
 
@@ -19,14 +20,6 @@ class DictStore:
 
     def names(self):
         return list(self.values)
-
-
-class FakeClock:
-    def __init__(self):
-        self.now = 100.0
-
-    def __call__(self):
-        return self.now
 
 
 def test_tick_and_pinning():
@@ -51,16 +44,17 @@ def test_interval_must_be_positive():
 
 async def test_start_samples_immediately_then_periodically():
     store = DictStore()
-    clock = FakeClock()
+    clock = VirtualClock(start=100)
     engine = GeneratorEngine(
-        store, {"x": Ramp(0, 100, period=100, mode="once")}, interval=0.01, clock=clock
+        store, {"x": Ramp(0, 100, period=100, mode="once")}, interval=0.5, clock=clock
     )
     engine.start()
     assert engine.running
     assert store.values["x"] == 0
-    clock.now += 42
-    await asyncio.sleep(0.05)
-    assert store.values["x"] == 42
+    await clock.advance(0.4)
+    assert store.values["x"] == 0  # next tick not due yet
+    await clock.advance(41.6)
+    assert store.values["x"] == pytest.approx(42)
     engine.start()  # idempotent
     await engine.stop()
     assert not engine.running

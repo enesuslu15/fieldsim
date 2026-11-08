@@ -267,14 +267,120 @@ class RegisterMap(_Model):
         return self
 
 
+# --------------------------------------------------------------------------- faults
+
+
+class _Fault(_Model):
+    probability: float = Field(
+        default=1.0, ge=0, le=1, description="Chance that a matching request is affected."
+    )
+    function_codes: list[Annotated[int, Field(ge=1, le=127)]] | None = Field(
+        default=None, description="Only affect these function codes (default: all)."
+    )
+    count: int | None = Field(
+        default=None, ge=1, description="Remove the fault after it affected this many requests."
+    )
+
+
+class LatencyFault(_Fault):
+    """Delay responses by ``delay`` plus a random ``0..jitter``."""
+
+    type: Literal["latency"]
+    delay: Duration
+    jitter: Duration = 0.0
+
+
+class DropFault(_Fault):
+    """Never answer the request. With ``executed: true`` the request is still
+    carried out and only the response is lost - the nasty case for retries."""
+
+    type: Literal["drop"]
+    executed: bool = False
+
+
+class DisconnectFault(_Fault):
+    """Close the client connection instead of answering."""
+
+    type: Literal["disconnect"]
+
+
+class ExceptionFault(_Fault):
+    """Answer with a Modbus exception code instead of the real response."""
+
+    type: Literal["exception"]
+    code: int = Field(default=6, ge=1, le=255, description="6 = SERVER DEVICE BUSY")
+
+
+CorruptMode = Literal["bit_flip", "truncate", "garbage", "bad_length", "transaction_id", "bad_crc"]
+
+TCP_ONLY_CORRUPT_MODES = frozenset({"bad_length", "transaction_id"})
+RTU_ONLY_CORRUPT_MODES = frozenset({"bad_crc"})
+
+
+class CorruptFault(_Fault):
+    """Send a damaged response.
+
+    ``bit_flip`` flips one random bit of the PDU, ``truncate`` sends only part of
+    the frame, ``garbage`` replaces it with random bytes of the same length,
+    ``bad_length`` (TCP) breaks the MBAP length field, ``transaction_id`` (TCP)
+    answers with the wrong transaction id and ``bad_crc`` (RTU) breaks the CRC.
+    """
+
+    type: Literal["corrupt"]
+    mode: CorruptMode = "bit_flip"
+
+
+FaultSpec = Annotated[
+    LatencyFault | DropFault | DisconnectFault | ExceptionFault | CorruptFault,
+    Field(discriminator="type"),
+]
+
+# --------------------------------------------------------------------------- scenario
+
+
+class ScenarioStep(_Model):
+    """One timed action. Exactly one of ``set``, ``release``, ``fault`` or ``offline``."""
+
+    at: Duration = Field(description="Time since the device started.")
+    set: dict[str, bool | int | float] | None = Field(
+        default=None, description="Point values to set (pauses their generators)."
+    )
+    release: list[str] | None = Field(
+        default=None, description="Points to hand back to their generators."
+    )
+    fault: FaultSpec | None = Field(default=None, description="Fault to activate.")
+    duration: Duration | None = Field(
+        default=None, description="How long the fault stays active (default: forever)."
+    )
+    offline: Duration | None = Field(
+        default=None, description="Stop listening and drop all clients for this long."
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> ScenarioStep:
+        actions = [
+            a for a in ("set", "release", "fault", "offline") if getattr(self, a) is not None
+        ]
+        if len(actions) != 1:
+            raise ValueError(
+                "each step needs exactly one of 'set', 'release', 'fault', 'offline'"
+                + (f" (got {', '.join(actions)})" if actions else "")
+            )
+        if self.duration is not None and self.fault is None:
+            raise ValueError("'duration' only applies to 'fault' steps")
+        if self.offline is not None and self.offline <= 0:
+            raise ValueError("offline duration must be > 0")
+        return self
+
+
 # --------------------------------------------------------------------------- devices
 
 
-class ModbusTcpDevice(_Model):
-    """A Modbus TCP server."""
+class ModbusDeviceSpec(_Model):
+    """A Modbus server reachable over TCP (native Modbus TCP or RTU framing over TCP)."""
 
     name: Name
-    protocol: Literal["modbus_tcp"]
+    protocol: Literal["modbus_tcp", "modbus_rtu_over_tcp"]
     host: str = "127.0.0.1"
     port: int = Field(default=502, ge=0, le=65535, description="0 picks a free port.")
     unit_id: int | None = Field(
@@ -294,6 +400,15 @@ class ModbusTcpDevice(_Model):
         default=0.1, description="How often generators refresh their points."
     )
     registers: RegisterMap = Field(default_factory=RegisterMap)
+    faults: list[FaultSpec] = Field(
+        default_factory=list, description="Faults active from the moment the device starts."
+    )
+    scenario: list[ScenarioStep] = Field(
+        default_factory=list, description="Timed actions, relative to device start."
+    )
+    seed: int | None = Field(
+        default=None, description="Seed for fault randomness, for reproducible runs."
+    )
 
     @field_validator("update_interval")
     @classmethod
@@ -302,8 +417,45 @@ class ModbusTcpDevice(_Model):
             raise ValueError("update_interval must be > 0")
         return v
 
+    @model_validator(mode="after")
+    def _check(self) -> ModbusDeviceSpec:
+        points = {p.name: p for p in self.registers.all_points()}
+        faults = list(self.faults)
+        for i, step in enumerate(self.scenario):
+            where = f"scenario[{i}]"
+            for name, value in (step.set or {}).items():
+                point = points.get(name)
+                if point is None:
+                    raise ValueError(f"{where}: unknown point {name!r}")
+                if isinstance(point, _RegisterPoint):
+                    try:
+                        coerce(value, point.type)
+                    except ValueError as exc:
+                        raise ValueError(f"{where}: {name}: {exc}") from None
+            for name in step.release or []:
+                if name not in points:
+                    raise ValueError(f"{where}: unknown point {name!r}")
+            if step.fault is not None:
+                faults.append(step.fault)
+        for fault in faults:
+            if isinstance(fault, CorruptFault):
+                check_corrupt_mode(fault.mode, self.protocol)
+        return self
 
-DeviceSpec = ModbusTcpDevice
+
+def check_corrupt_mode(mode: str, protocol: str) -> None:
+    if protocol == "modbus_tcp" and mode in RTU_ONLY_CORRUPT_MODES:
+        raise ValueError(
+            f"corrupt mode {mode!r} needs RTU framing (CRC); use it with modbus_rtu_over_tcp"
+        )
+    if protocol == "modbus_rtu_over_tcp" and mode in TCP_ONLY_CORRUPT_MODES:
+        raise ValueError(f"corrupt mode {mode!r} only exists in Modbus TCP framing")
+
+
+ModbusTcpDevice = ModbusDeviceSpec
+"""Backwards compatible alias."""
+
+DeviceSpec = ModbusDeviceSpec
 """Union of all device kinds. Grows as protocols are added."""
 
 
@@ -360,13 +512,26 @@ def _format_validation_error(exc: ValidationError) -> list[str]:
     messages = []
     for err in exc.errors(include_url=False):
         # Drop the discriminator tag pydantic inserts for tagged unions, it is noise.
-        loc = tuple(p for p in err["loc"] if p not in _GENERATOR_TAGS)
+        loc = tuple(p for p in err["loc"] if p not in _UNION_TAGS)
         msg = err["msg"].removeprefix("Value error, ")
         messages.append(f"{_format_location(loc)}: {msg}")
     return messages
 
 
-_GENERATOR_TAGS = {"constant", "sine", "ramp", "random_walk", "sequence"}
+_UNION_TAGS = {
+    # generators
+    "constant",
+    "sine",
+    "ramp",
+    "random_walk",
+    "sequence",
+    # faults
+    "latency",
+    "drop",
+    "disconnect",
+    "exception",
+    "corrupt",
+}
 
 
 def parse_config(data: Any, *, source: str | None = None) -> SimulationConfig:

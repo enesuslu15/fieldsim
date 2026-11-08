@@ -202,3 +202,70 @@ def test_load_config_reports_source_and_errors(tmp_path):
 def test_json_schema_is_generated():
     schema = SimulationConfig.model_json_schema()
     assert "devices" in schema["properties"]
+
+
+# --------------------------------------------------------------------------- faults & scenario
+
+POINTS = {
+    "coils": [{"name": "run", "address": 0}],
+    "holding_registers": [{"name": "sp", "address": 0, "type": "int16"}],
+}
+
+
+def test_faults_and_scenario_parse():
+    cfg = parse_config(
+        config(
+            device(
+                registers=POINTS,
+                seed=3,
+                faults=[{"type": "latency", "delay": "50ms", "probability": 0.5}],
+                scenario=[
+                    {"at": "1s", "set": {"run": True, "sp": -5}},
+                    {"at": "2s", "fault": {"type": "drop", "count": 3}, "duration": "1s"},
+                    {"at": "3s", "offline": "2s"},
+                    {"at": "4s", "release": ["sp"]},
+                ],
+            )
+        )
+    )
+    dev = cfg.devices[0]
+    assert dev.faults[0].delay == 0.05
+    assert [s.at for s in dev.scenario] == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize(
+    ("step", "message"),
+    [
+        ({"at": 1}, "exactly one of 'set', 'release', 'fault', 'offline'"),
+        ({"at": 1, "set": {"run": 1}, "offline": 1}, "(got set, offline)"),
+        ({"at": 1, "set": {"run": 1}, "duration": 1}, "'duration' only applies to 'fault'"),
+        ({"at": 1, "offline": 0}, "offline duration must be > 0"),
+        ({"at": 1, "set": {"nope": 1}}, "scenario[0]: unknown point 'nope'"),
+        ({"at": 1, "release": ["nope"]}, "scenario[0]: unknown point 'nope'"),
+        ({"at": 1, "set": {"sp": 99999}}, "scenario[0]: sp: 99999 is out of range for int16"),
+        (
+            {"at": 1, "fault": {"type": "corrupt", "mode": "bad_crc"}},
+            "corrupt mode 'bad_crc' needs RTU framing",
+        ),
+    ],
+)
+def test_scenario_validation(step, message):
+    assert message in errors_of(config(device(registers=POINTS, scenario=[step])))
+
+
+@pytest.mark.parametrize(
+    ("protocol", "mode", "message"),
+    [
+        ("modbus_tcp", "bad_crc", "needs RTU framing"),
+        ("modbus_rtu_over_tcp", "transaction_id", "only exists in Modbus TCP"),
+        ("modbus_rtu_over_tcp", "bad_length", "only exists in Modbus TCP"),
+    ],
+)
+def test_corrupt_mode_must_fit_protocol(protocol, mode, message):
+    fault = {"type": "corrupt", "mode": mode}
+    assert message in errors_of(config(device(protocol=protocol, faults=[fault])))
+
+
+def test_fault_errors_have_clean_locations():
+    msg = errors_of(config(device(faults=[{"type": "latency"}])))
+    assert "devices[0].faults[0].delay: Field required" in msg

@@ -7,16 +7,23 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from fieldsim.config import DeviceSpec, ModbusTcpDevice, SimulationConfig, load_config, parse_config
+from fieldsim.config import (
+    DeviceSpec,
+    ModbusDeviceSpec,
+    SimulationConfig,
+    load_config,
+    parse_config,
+)
+from fieldsim.core.clock import Clock, RealClock
 from fieldsim.core.device import Device
 
 
-def create_device(spec: DeviceSpec) -> Device[Any]:
+def create_device(spec: DeviceSpec, *, clock: Clock | None = None) -> Device[Any]:
     """Instantiate the device class matching ``spec.protocol``."""
-    if isinstance(spec, ModbusTcpDevice):
+    if isinstance(spec, ModbusDeviceSpec):
         from fieldsim.protocols.modbus.device import ModbusDevice
 
-        return ModbusDevice(spec)
+        return ModbusDevice(spec, clock=clock)
     raise TypeError(f"unsupported device spec: {type(spec).__name__}")  # pragma: no cover
 
 
@@ -30,19 +37,21 @@ class Simulator:
             plc.set("temperature", 85.0)
     """
 
-    def __init__(self, config: SimulationConfig):
+    def __init__(self, config: SimulationConfig, *, clock: Clock | None = None):
         self.config = config
+        #: Shared by every device, so their scenarios stay in step.
+        self.clock: Clock = clock or RealClock()
         self.devices: dict[str, Device[Any]] = {
-            spec.name: create_device(spec) for spec in config.devices
+            spec.name: create_device(spec, clock=self.clock) for spec in config.devices
         }
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> Simulator:
-        return cls(load_config(path))
+    def from_yaml(cls, path: str | Path, *, clock: Clock | None = None) -> Simulator:
+        return cls(load_config(path), clock=clock)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Simulator:
-        return cls(parse_config(data))
+    def from_dict(cls, data: dict[str, Any], *, clock: Clock | None = None) -> Simulator:
+        return cls(parse_config(data), clock=clock)
 
     def __getitem__(self, name: str) -> Device[Any]:
         try:

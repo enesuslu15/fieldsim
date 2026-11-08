@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from types import TracebackType
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
+from fieldsim.config import FaultSpec, ScenarioStep
+from fieldsim.core.clock import Clock, RealClock
 from fieldsim.core.datastore import PointStore, Value
 from fieldsim.core.engine import GeneratorEngine
+from fieldsim.core.faults import ActiveFault, FaultInjector, parse_fault
 from fieldsim.core.generators import Generator
+from fieldsim.core.scenario import ScenarioRunner
 
 StoreT = TypeVar("StoreT", bound=PointStore)
 
@@ -18,8 +23,12 @@ class Device(ABC, Generic[StoreT]):
     """A running (or startable) virtual device.
 
     Subclasses only implement the network side (:meth:`_start_server`,
-    :meth:`_stop_server`, :attr:`host`, :attr:`port`); value handling and
-    generators are shared.
+    :meth:`_stop_server`, :attr:`host`, :attr:`port`). Values, generators,
+    faults, scenarios and outages are shared by every protocol.
+
+    All methods must be called from the event loop that runs the device. For
+    use from other threads (for example synchronous tests) see
+    :class:`fieldsim.BackgroundSimulator`.
     """
 
     protocol: str = ""
@@ -31,11 +40,23 @@ class Device(ABC, Generic[StoreT]):
         generators: Mapping[str, Generator],
         *,
         update_interval: float,
+        faults: Iterable[FaultSpec] = (),
+        scenario: Sequence[ScenarioStep] = (),
+        seed: int | None = None,
+        clock: Clock | None = None,
     ):
         self.name = name
         self.store = store
-        self._engine = GeneratorEngine(store, generators, interval=update_interval)
+        self.clock: Clock = clock or RealClock()
+        self.faults = FaultInjector(seed=seed)
+        for spec in faults:
+            self.add_fault(spec)
+        self._engine = GeneratorEngine(
+            store, generators, interval=update_interval, clock=self.clock
+        )
+        self.scenario = ScenarioRunner(self, scenario, self.clock)
         self._running = False
+        self._online = False
 
     # ------------------------------------------------------------------ network
 
@@ -64,19 +85,61 @@ class Device(ABC, Generic[StoreT]):
     def running(self) -> bool:
         return self._running
 
+    @property
+    def online(self) -> bool:
+        """True while the device accepts connections (False during an outage)."""
+        return self._online
+
     async def start(self) -> None:
         if self._running:
             return
         await self._start_server()
-        self._engine.start()
+        self._online = True
         self._running = True
+        self._engine.start()
+        self.scenario.start()
 
     async def stop(self) -> None:
         if not self._running:
             return
         self._running = False
+        await self.scenario.stop()
         await self._engine.stop()
-        await self._stop_server()
+        if self._online:
+            self._online = False
+            await self._stop_server()
+
+    async def go_offline(self) -> None:
+        """Simulate a power or network loss: drop every client and refuse new ones.
+
+        Values and generators keep running, as they would on a device whose
+        network link went down.
+        """
+        self._require_running()
+        if self._online:
+            self._online = False
+            await self._stop_server()
+
+    async def go_online(self) -> None:
+        """End an outage; the device listens on the same port again."""
+        self._require_running()
+        if not self._online:
+            await self._start_server()
+            self._online = True
+
+    @asynccontextmanager
+    async def offline(self) -> AsyncIterator[None]:
+        """``async with device.offline(): ...`` - outage for the duration of the block."""
+        await self.go_offline()
+        try:
+            yield
+        finally:
+            if self._running:
+                await self.go_online()
+
+    def _require_running(self) -> None:
+        if not self._running:
+            raise RuntimeError(f"device {self.name!r} is not running")
 
     async def __aenter__(self) -> Device[StoreT]:
         await self.start()
@@ -89,6 +152,29 @@ class Device(ABC, Generic[StoreT]):
         tb: TracebackType | None,
     ) -> None:
         await self.stop()
+
+    # ------------------------------------------------------------------ faults
+
+    def validate_fault(self, spec: FaultSpec) -> None:
+        """Reject faults that make no sense for this protocol. Overridden by subclasses."""
+
+    def add_fault(self, spec: FaultSpec) -> ActiveFault:
+        self.validate_fault(spec)
+        return self.faults.add(spec)
+
+    def fault(self, fault_type: str, **params: Any) -> ActiveFault:
+        """Activate a fault, e.g. ``device.fault("latency", delay="200ms")``.
+
+        The returned object is a context manager that removes the fault again::
+
+            with device.fault("drop", count=2) as f:
+                ...
+            assert f.hits == 2
+        """
+        return self.add_fault(parse_fault(fault_type, **params))
+
+    def clear_faults(self) -> None:
+        self.faults.clear()
 
     # ------------------------------------------------------------------ values
 
@@ -115,5 +201,5 @@ class Device(ABC, Generic[StoreT]):
         return self._engine.generated
 
     def __repr__(self) -> str:
-        state = "running" if self._running else "stopped"
+        state = "stopped" if not self._running else "running" if self._online else "offline"
         return f"<{type(self).__name__} {self.name!r} {self.host}:{self.port} {state}>"

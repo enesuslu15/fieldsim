@@ -49,6 +49,9 @@ dev = [
 [project.scripts]
 fieldsim = "fieldsim.cli:app"
 
+[project.entry-points.pytest11]
+fieldsim = "fieldsim.pytest_plugin"
+
 [project.urls]
 Homepage = "https://github.com/enesuslu15/fieldsim"
 Issues = "https://github.com/enesuslu15/fieldsim/issues"

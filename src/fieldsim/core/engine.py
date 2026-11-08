@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 
+from fieldsim.core.clock import Clock, RealClock
 from fieldsim.core.datastore import PointStore
 from fieldsim.core.generators import Generator
 
@@ -27,14 +27,14 @@ class GeneratorEngine:
         generators: Mapping[str, Generator],
         *,
         interval: float,
-        clock: Callable[[], float] = time.monotonic,
+        clock: Clock | None = None,
     ):
         if interval <= 0:
             raise ValueError("interval must be > 0")
         self._store = store
         self._generators = dict(generators)
         self._interval = interval
-        self._clock = clock
+        self._clock: Clock = clock or RealClock()
         self._pinned: set[str] = set()
         self._task: asyncio.Task[None] | None = None
         self._t0 = 0.0
@@ -67,7 +67,7 @@ class GeneratorEngine:
     def start(self) -> None:
         if self.running or not self._generators:
             return
-        self._t0 = self._clock()
+        self._t0 = self._clock.time()
         self.tick(0.0)
         self._task = asyncio.get_running_loop().create_task(self._run(), name="fieldsim-engine")
 
@@ -81,8 +81,8 @@ class GeneratorEngine:
 
     async def _run(self) -> None:
         while True:
-            await asyncio.sleep(self._interval)
+            await self._clock.sleep(self._interval)
             try:
-                self.tick(self._clock() - self._t0)
+                self.tick(self._clock.time() - self._t0)
             except Exception:  # keep the device alive; one bad generator must not stop the rest
                 logger.exception("generator tick failed")

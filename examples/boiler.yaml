@@ -34,3 +34,14 @@ devices:
           type: uint32
           word_order: little
           generator: { type: ramp, start: 0, end: 100000, period: 1h, mode: once }
+
+    # A slightly sluggish PLC, as on a busy plant network.
+    faults:
+      - { type: latency, delay: 5ms, jitter: 5ms }
+
+    # Overheat at 30 s, a busy period at 40 s, a 10 s outage at 60 s.
+    scenario:
+      - { at: 30s, set: { temperature: 120.0 } }
+      - { at: 40s, fault: { type: exception, code: 6 }, duration: 5s }
+      - { at: 60s, offline: 10s }
+      - { at: 90s, release: [temperature] }

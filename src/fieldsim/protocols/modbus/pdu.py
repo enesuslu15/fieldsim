@@ -42,7 +42,7 @@ def unpack_bits(data: bytes, count: int) -> list[bool]:
     return [bool(data[i // 8] >> (i % 8) & 1) for i in range(count)]
 
 
-def exception_response(function_code: int, code: ExceptionCode) -> bytes:
+def exception_response(function_code: int, code: ExceptionCode | int) -> bytes:
     return bytes([(function_code | 0x80) & 0xFF, code])
 
 

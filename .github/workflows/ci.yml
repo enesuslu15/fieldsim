@@ -37,4 +37,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: pip install -e ".[dev]"
-      - run: pytest --cov --cov-report=term --cov-report=xml
+      # `coverage run` instead of `pytest --cov`: fieldsim's pytest plugin is loaded
+      # from an entry point before pytest-cov starts, which would hide import-time lines.
+      - run: coverage run -m pytest
+      - run: coverage report
+      - run: coverage xml
+      - name: Example project tests
+        run: pytest examples
