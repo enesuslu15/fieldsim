@@ -1,0 +1,36 @@
+# A small boiler controller: run it with
+#   fieldsim run examples/boiler.yaml
+# and point any Modbus TCP client at 127.0.0.1:5020.
+version: 1
+devices:
+  - name: boiler-plc
+    protocol: modbus_tcp
+    host: 127.0.0.1
+    port: 5020
+    unit_id: 1
+    update_interval: 100ms
+    registers:
+      coils:
+        - { name: pump_on, address: 0, value: true }
+        - { name: burner_enable, address: 1 }
+      discrete_inputs:
+        - name: flame_detected
+          address: 0
+          generator: { type: sequence, values: [0, 1, 1, 1, 0], interval: 2s }
+      holding_registers:
+        - name: temperature
+          address: 0
+          type: float32
+          description: Boiler water temperature in degC
+          generator: { type: sine, min: 60, max: 90, period: 30s }
+        - { name: setpoint, address: 2, type: uint16, value: 75 }
+        - name: pressure_mbar
+          address: 3
+          type: uint16
+          generator: { type: random_walk, start: 1500, step: 5, min: 1200, max: 1800, seed: 42 }
+      input_registers:
+        - name: runtime_hours
+          address: 0
+          type: uint32
+          word_order: little
+          generator: { type: ramp, start: 0, end: 100000, period: 1h, mode: once }

@@ -1,0 +1,102 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fieldsim"
+dynamic = ["version"]
+description = "Virtual Modbus, OPC UA and S7 devices for testing industrial software without hardware."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "enesuslu15" }]
+keywords = ["modbus", "opc-ua", "s7", "plc", "simulator", "testing", "pytest", "industrial", "iiot"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Manufacturing",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+    "Topic :: System :: Networking",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.6,<3",
+    "PyYAML>=6.0",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "pymodbus>=3.10,<4",  # independent client used to verify the server
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "types-PyYAML",
+    "pre-commit>=3.5",
+]
+
+[project.scripts]
+fieldsim = "fieldsim.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/enesuslu15/fieldsim"
+Issues = "https://github.com/enesuslu15/fieldsim/issues"
+
+[tool.hatch.version]
+path = "src/fieldsim/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fieldsim"]
+
+# --------------------------------------------------------------------------- pytest
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+source = ["fieldsim"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+    "\\.\\.\\.",
+]
+
+# --------------------------------------------------------------------------- lint / types
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC", "PT", "C4", "PIE", "RET"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["src"]
