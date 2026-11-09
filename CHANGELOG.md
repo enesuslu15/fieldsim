@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); until 1.0 minor versions may change
 the file format.
 
-## [0.4.0] - unreleased
+## [0.4.0] - 2026-11-09
 
 ### Added
 
