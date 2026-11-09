@@ -270,3 +270,29 @@ def test_opcua_fixtures(project):
     result = project.runpytest("-p", "no:cacheprovider")
     result.assert_outcomes(passed=3, errors=1)
     result.stdout.fnmatch_lines(["*opcua_device needs exactly one OPC UA device, found: none*"])
+
+
+def test_s7_fixtures(project):
+    project.makepyfile(
+        """
+        import struct
+        from snap7.client import Client
+
+        def read_int(handle, db, offset):
+            c = Client()
+            c.connect(handle.host, handle.rack, handle.slot, handle.port)
+            try:
+                return struct.unpack(">h", c.db_read(db, offset, 2))[0]
+            finally:
+                c.disconnect()
+
+        def test_zero_config(s7_device):
+            assert read_int(s7_device, 1, 1000) == 0  # DB1 is 1 KiB of plain memory
+
+        def test_factory(make_s7_device):
+            point = {"name": "v", "offset": 2, "type": "INT", "value": -9}
+            press = make_s7_device(data_blocks=[{"number": 7, "points": [point]}])
+            assert read_int(press, 7, 2) == -9
+        """
+    )
+    project.runpytest("-p", "no:cacheprovider").assert_outcomes(passed=2)

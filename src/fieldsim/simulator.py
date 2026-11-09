@@ -11,6 +11,7 @@ from fieldsim.config import (
     AnyDeviceSpec,
     ModbusDeviceSpec,
     OpcUaDeviceSpec,
+    S7DeviceSpec,
     SimulationConfig,
     load_config,
     parse_config,
@@ -29,6 +30,10 @@ def create_device(spec: AnyDeviceSpec, *, clock: Clock | None = None) -> Device[
         from fieldsim.protocols.opcua.device import OpcUaDevice
 
         return OpcUaDevice(spec, clock=clock)
+    if isinstance(spec, S7DeviceSpec):
+        from fieldsim.protocols.s7.device import S7Device
+
+        return S7Device(spec, clock=clock)
     raise TypeError(f"unsupported device spec: {type(spec).__name__}")  # pragma: no cover
 
 

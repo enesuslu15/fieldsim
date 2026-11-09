@@ -202,3 +202,58 @@ def decode(
         chunks.reverse()
     (value,) = struct.unpack(">" + _STRUCT_FORMAT[data_type], b"".join(chunks))
     return value  # type: ignore[no-any-return]
+
+
+# --------------------------------------------------------------------------- Siemens S7
+
+S7Type = Literal[
+    "BOOL",
+    "BYTE",
+    "WORD",
+    "DWORD",
+    "SINT",
+    "USINT",
+    "INT",
+    "UINT",
+    "DINT",
+    "UDINT",
+    "REAL",
+    "LREAL",
+]
+"""S7 elementary data types supported for points (all big-endian, as in the PLC)."""
+
+S7_FORMATS: dict[str, str] = {
+    "BYTE": "B",
+    "WORD": "H",
+    "DWORD": "I",
+    "SINT": "b",
+    "USINT": "B",
+    "INT": "h",
+    "UINT": "H",
+    "DINT": "i",
+    "UDINT": "I",
+    "REAL": "f",
+    "LREAL": "d",
+}
+
+
+def s7_size(data_type: S7Type) -> int:
+    """Bytes occupied by a value of ``data_type`` (a BOOL uses one bit of one byte)."""
+    if data_type == "BOOL":
+        return 1
+    return struct.calcsize(">" + S7_FORMATS[data_type])
+
+
+def coerce_s7(value: object, data_type: S7Type, *, clamp: bool = False) -> bool | int | float:
+    """Like :func:`coerce`, for S7 data types."""
+    if isinstance(value, str):
+        raise TypeError(f"expected a number for {data_type}, got a string")
+    if data_type == "BOOL":
+        return bool(value)
+    number = _as_number(value)
+    fmt = S7_FORMATS[data_type]
+    if fmt in "fd":
+        return _coerce_float(number, fmt == "f", clamp, data_type)
+    bits = struct.calcsize(fmt) * 8
+    lo, hi = (-(2 ** (bits - 1)), 2 ** (bits - 1) - 1) if fmt.islower() else (0, 2**bits - 1)
+    return _coerce_integer(number, lo, hi, clamp, data_type)

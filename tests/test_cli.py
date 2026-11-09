@@ -149,7 +149,7 @@ def test_console_script_serves_until_terminated(tmp_path):
 # --------------------------------------------------------------------------- init / check / --host
 
 
-@pytest.mark.parametrize("protocol", ["modbus", "opcua"])
+@pytest.mark.parametrize("protocol", ["modbus", "opcua", "s7"])
 def test_init_writes_a_valid_file(tmp_path, protocol):
     path = tmp_path / f"{protocol}.yaml"
     result = runner.invoke(app, ["init", str(path), "--protocol", protocol])

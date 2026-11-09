@@ -212,3 +212,29 @@ def test_opcua_handle():
         handle = s["l"]
         assert handle.endpoint.startswith("opc.tcp://127.0.0.1:")
         assert handle.node_id("S").endswith(";s=S")
+
+
+def test_s7_handle():
+    cfg = {
+        "devices": [
+            {
+                "name": "p",
+                "protocol": "s7",
+                "port": 0,
+                "rack": 0,
+                "slot": 2,
+                "data_blocks": [
+                    {"number": 3, "points": [{"name": "v", "offset": 4, "type": "INT"}]}
+                ],
+            }
+        ]
+    }
+    with BackgroundSimulator(cfg) as s:
+        handle = s["p"]
+        assert (handle.rack, handle.slot) == (0, 2)
+        assert handle.address_of("v") == "DB3.DBW4"
+
+
+def test_s7_only_attributes_on_modbus(sim):
+    with pytest.raises(AttributeError, match="no S7 addresses"):
+        sim["plc"].address_of("setpoint")

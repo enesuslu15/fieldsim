@@ -39,10 +39,18 @@ DEFAULT_DEVICE: dict[str, Any] = {
     "unmapped": "allow",
 }
 DEFAULT_OPCUA_DEVICE: dict[str, Any] = {"name": "device", "protocol": "opcua", "port": 0}
+DEFAULT_S7_DEVICE: dict[str, Any] = {
+    "name": "device",
+    "protocol": "s7",
+    "port": 0,
+    "data_blocks": [{"number": 1, "size": 1024}],
+    "merkers": {"size": 256},
+}
 
 _FAMILIES = {
     "modbus": ("Modbus", DEFAULT_DEVICE),
     "opcua": ("OPC UA", DEFAULT_OPCUA_DEVICE),
+    "s7": ("S7", DEFAULT_S7_DEVICE),
 }
 
 
@@ -165,6 +173,15 @@ def opcua_device(request: pytest.FixtureRequest) -> DeviceHandle:
     return _single_device(request, "opcua")
 
 
+@pytest.fixture
+def s7_device(request: pytest.FixtureRequest) -> DeviceHandle:
+    """The S7 PLC of the simulation (experimental).
+
+    Unconfigured: DB1 (1 KiB) and 256 merker bytes of plain memory.
+    """
+    return _single_device(request, "s7")
+
+
 def _factory(default: Mapping[str, Any]) -> Iterator[Callable[..., DeviceHandle]]:
     started: list[BackgroundSimulator] = []
 
@@ -203,3 +220,13 @@ def make_opcua_device() -> Iterator[Callable[..., DeviceHandle]]:
         client = Client(line.endpoint)
     """
     yield from _factory(DEFAULT_OPCUA_DEVICE)
+
+
+@pytest.fixture
+def make_s7_device() -> Iterator[Callable[..., DeviceHandle]]:
+    """Factory for ad-hoc S7 PLCs (experimental)::
+
+    def test_press(make_s7_device):
+        press = make_s7_device(data_blocks=[{"number": 5, "points": [...]}])
+    """
+    yield from _factory(DEFAULT_S7_DEVICE)

@@ -379,3 +379,51 @@ def test_modbus_scenario_rejects_strings():
     step = {"at": 1, "set": {"run": "on"}}
     msg = errors_of(config(device(registers=regs, scenario=[step])))
     assert "scenario[0]: run: expected a boolean, got a string" in msg
+
+
+# --------------------------------------------------------------------------- S7
+
+
+def s7(**overrides):
+    data = {
+        "name": "press",
+        "protocol": "s7",
+        "data_blocks": [{"number": 1, "points": [{"name": "p", "offset": 0, "type": "REAL"}]}],
+    }
+    data.update(overrides)
+    return data
+
+
+def test_s7_defaults_and_areas():
+    dev = parse_config(config(s7(merkers={"size": 8}))).devices[0]
+    assert (dev.port, dev.rack, dev.slot) == (102, 0, 1)
+    assert [(code, number) for code, number, _ in dev.areas()] == [("DB", 1), ("MK", 0)]
+    assert dev.point_names() == ["p"]
+    assert dev.areas()[0][2].byte_size == 4
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"data_blocks": [{"number": 1}, {"number": 1}]}, "duplicate data block number(s): [1]"),
+        (
+            {"merkers": {"points": [{"name": "p", "offset": 0, "type": "BYTE"}]}},
+            "duplicate point name 'p'",
+        ),
+        (
+            {
+                "data_blocks": [
+                    {"number": 1, "size": 2, "points": [{"name": "x", "offset": 0, "type": "REAL"}]}
+                ]
+            },
+            "ends after the area size of 2 bytes",
+        ),
+        ({"data_blocks": [{"number": 0}]}, "data_blocks[0].number"),
+        ({"rack": 9}, "rack"),
+        ({"faults": [{"type": "exception"}]}, "not supported for S7 devices yet"),
+        ({"faults": [{"type": "drop", "function_codes": [3]}]}, "use 'services' with S7"),
+        ({"scenario": [{"at": 1, "set": {"p": "hot"}}]}, "scenario[0]: p: expected a number"),
+    ],
+)
+def test_s7_validation(overrides, message):
+    assert message in errors_of(config(s7(**overrides)))

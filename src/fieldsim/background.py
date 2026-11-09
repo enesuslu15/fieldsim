@@ -276,6 +276,22 @@ class DeviceHandle:
             raise AttributeError(f"{self.protocol} devices have no OPC UA endpoint")
         return str(self.device.endpoint)
 
+    @property
+    def rack(self) -> int:
+        """S7 rack clients should connect with."""
+        return int(getattr(self.device, "rack", 0))
+
+    @property
+    def slot(self) -> int:
+        """S7 slot clients should connect with."""
+        return int(getattr(self.device, "slot", 1))
+
+    def address_of(self, point: str) -> str:
+        """S7 address of a point in Siemens notation, e.g. ``"DB1.DBD0"``."""
+        if not hasattr(self.device, "address_of"):
+            raise AttributeError(f"{self.protocol} devices have no S7 addresses")
+        return str(self._call(self.device.address_of, point))
+
     def node_id(self, point: str) -> str:
         """OPC UA node id string of a point, e.g. ``"ns=2;s=Line1.Speed"``."""
         if not hasattr(self.device, "node_id"):

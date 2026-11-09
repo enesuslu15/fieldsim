@@ -10,9 +10,9 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 authors = [{ name = "enesuslu15" }]
-keywords = ["modbus", "opc-ua", "s7", "plc", "simulator", "testing", "pytest", "industrial", "iiot"]
+keywords = ["modbus", "opc-ua", "s7", "siemens", "plc", "simulator", "testing", "pytest", "industrial", "iiot"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Framework :: AsyncIO",
     "Framework :: Pytest",
     "Intended Audience :: Developers",
@@ -36,8 +36,12 @@ dependencies = [
 
 [project.optional-dependencies]
 opcua = ["asyncua>=2.1,<3"]
+s7 = ["python-snap7>=3.4,<4"]
+all = ["asyncua>=2.1,<3", "python-snap7>=3.4,<4"]
+docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.26"]
 dev = [
     "asyncua>=2.1,<3",
+    "python-snap7>=3.4,<4",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
@@ -56,6 +60,8 @@ fieldsim = "fieldsim.pytest_plugin"
 
 [project.urls]
 Homepage = "https://github.com/enesuslu15/fieldsim"
+Documentation = "https://enesuslu15.github.io/fieldsim/"
+Changelog = "https://github.com/enesuslu15/fieldsim/blob/main/CHANGELOG.md"
 Issues = "https://github.com/enesuslu15/fieldsim/issues"
 
 [tool.hatch.version]

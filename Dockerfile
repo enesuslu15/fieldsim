@@ -16,7 +16,7 @@ RUN pip wheel --no-cache-dir --no-deps --wheel-dir /wheels .
 
 FROM python:3.12-slim
 LABEL org.opencontainers.image.title="fieldsim" \
-      org.opencontainers.image.description="Virtual Modbus and OPC UA devices for testing industrial software" \
+      org.opencontainers.image.description="Virtual Modbus, OPC UA and S7 devices for testing industrial software" \
       org.opencontainers.image.source="https://github.com/enesuslu15/fieldsim" \
       org.opencontainers.image.licenses="MIT"
 
@@ -26,7 +26,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 COPY --from=build /wheels /wheels
 RUN wheel="$(ls /wheels/fieldsim-*.whl)" \
-    && pip install --no-cache-dir "${wheel}[opcua]" \
+    && pip install --no-cache-dir "${wheel}[all]" \
     && rm -rf /wheels \
     && useradd --system --uid 10001 --no-create-home fieldsim
 
@@ -34,7 +34,7 @@ COPY examples/boiler.yaml /config/devices.yaml
 
 USER fieldsim
 WORKDIR /config
-EXPOSE 502 4840 5020
+EXPOSE 502 1102 4840 5020
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
     CMD ["fieldsim", "check", "/config/devices.yaml"]

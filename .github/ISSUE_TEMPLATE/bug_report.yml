@@ -1,0 +1,38 @@
+name: Bug report
+description: Something does not work as documented, or not like a real device.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Device file and test
+      description: The smallest YAML file and test (or client code) that show the problem.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: real-device
+    attributes:
+      label: How does a real device behave?
+      description: Optional. Very helpful for protocol details (vendor, model, firmware).
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Output of `fieldsim --version`, plus Python version and OS.
+      placeholder: fieldsim 0.4.0, Python 3.12, Windows 11
+    validations:
+      required: true
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: Protocol
+      multiple: true
+      options: [Modbus TCP, Modbus RTU over TCP, OPC UA, S7, not protocol specific]

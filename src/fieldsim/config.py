@@ -45,9 +45,12 @@ from fieldsim.core.types import (
     OpcUaType,
     Order,
     RegisterType,
+    S7Type,
     coerce,
     coerce_opcua,
+    coerce_s7,
     register_count,
+    s7_size,
 )
 
 # --------------------------------------------------------------------------- primitives
@@ -378,6 +381,7 @@ CorruptMode = Literal["bit_flip", "truncate", "garbage", "bad_length", "transact
 TCP_ONLY_CORRUPT_MODES = frozenset({"bad_length", "transaction_id"})
 RTU_ONLY_CORRUPT_MODES = frozenset({"bad_crc"})
 OPCUA_CORRUPT_MODES = frozenset({"bit_flip", "truncate", "garbage", "bad_length"})
+S7_CORRUPT_MODES = OPCUA_CORRUPT_MODES
 
 
 class CorruptFault(_Fault):
@@ -428,6 +432,18 @@ def check_fault(fault: FaultSpec, protocol: str) -> None:
             raise ValueError(
                 f"corrupt mode {fault.mode!r} does not exist for OPC UA "
                 f"(use one of: {', '.join(sorted(OPCUA_CORRUPT_MODES))})"
+            )
+    elif protocol == "s7":
+        if isinstance(fault, ExceptionFault | StatusFault):
+            raise ValueError(f"'{fault.type}' faults are not supported for S7 devices yet")
+        if fault.function_codes is not None:
+            raise ValueError("'function_codes' filters Modbus requests; use 'services' with S7")
+        if fault.services is not None and not set(fault.services) <= {"Read", "Write"}:
+            raise ValueError("S7 faults can only be filtered by the services Read and Write")
+        if isinstance(fault, CorruptFault) and fault.mode not in S7_CORRUPT_MODES:
+            raise ValueError(
+                f"corrupt mode {fault.mode!r} does not exist for S7 "
+                f"(use one of: {', '.join(sorted(S7_CORRUPT_MODES))})"
             )
 
 
@@ -688,10 +704,127 @@ def _check_unique_names(nodes: list[OpcUaNode], where: str) -> None:
             _check_unique_names(node.nodes, f"{where}.{node.name}")
 
 
-DeviceSpec = Annotated[ModbusDeviceSpec | OpcUaDeviceSpec, Field(discriminator="protocol")]
+# --------------------------------------------------------------------------- Siemens S7
+
+
+class S7Point(_Model):
+    """A value inside a data block or memory area."""
+
+    name: Name
+    offset: int = Field(ge=0, le=65535, description="Byte offset in the area.")
+    bit: int | None = Field(default=None, ge=0, le=7, description="Bit number, for BOOL only.")
+    type: S7Type = "INT"
+    value: bool | int | float = 0
+    description: str | None = None
+    generator: GeneratorSpec | None = None
+
+    @property
+    def size(self) -> int:
+        return s7_size(self.type)
+
+    @property
+    def bit_index(self) -> int:
+        return self.bit or 0
+
+    @model_validator(mode="after")
+    def _check(self) -> S7Point:
+        if self.bit is not None and self.type != "BOOL":
+            raise ValueError("'bit' only applies to BOOL points")
+        coerce_s7(self.value, self.type)
+        return self
+
+
+class S7Area(_Model):
+    """A memory area (merkers, inputs or outputs) holding points."""
+
+    size: int | None = Field(
+        default=None, ge=1, le=65536, description="Size in bytes. Default: just fits the points."
+    )
+    points: list[S7Point] = Field(default_factory=list)
+
+    @property
+    def byte_size(self) -> int:
+        end = max((p.offset + p.size for p in self.points), default=0)
+        return self.size or max(end, 1)
+
+    @model_validator(mode="after")
+    def _check(self) -> S7Area:
+        used: dict[tuple[int, int | None], str] = {}  # (byte, bit or None for a whole byte)
+        for point in self.points:
+            if self.size is not None and point.offset + point.size > self.size:
+                raise ValueError(f"{point.name!r} ends after the area size of {self.size} bytes")
+            if point.type == "BOOL":
+                cells = [(point.offset, point.bit_index), (point.offset, None)]
+                key: list[tuple[int, int | None]] = [(point.offset, point.bit_index)]
+            else:
+                cells = [(b, None) for b in range(point.offset, point.offset + point.size)]
+                cells += [
+                    (b, i) for b in range(point.offset, point.offset + point.size) for i in range(8)
+                ]
+                key = [(b, None) for b in range(point.offset, point.offset + point.size)]
+            for cell in cells:
+                if cell in used:
+                    where = f"byte {cell[0]}" + ("" if cell[1] is None else f" bit {cell[1]}")
+                    raise ValueError(f"{point.name!r} overlaps {used[cell]!r} at {where}")
+            for cell in key:
+                used[cell] = point.name
+        return self
+
+
+class S7DataBlock(S7Area):
+    number: int = Field(ge=1, le=65535, description="DB number.")
+
+
+class S7DeviceSpec(_DeviceBase):
+    """A Siemens S7 PLC (S7comm over ISO-on-TCP). Experimental."""
+
+    protocol: Literal["s7"]
+    port: int = Field(
+        default=102,
+        ge=0,
+        le=65535,
+        description="ISO-on-TCP port; 102 needs root on Linux, so tests usually use 0 or 1102.",
+    )
+    rack: int = Field(default=0, ge=0, le=7, description="Rack clients should connect with.")
+    slot: int = Field(default=1, ge=0, le=31, description="Slot clients should connect with.")
+    data_blocks: list[S7DataBlock] = Field(default_factory=list)
+    merkers: S7Area | None = Field(default=None, description="M area (flags).")
+    inputs: S7Area | None = Field(default=None, description="I area (process inputs).")
+    outputs: S7Area | None = Field(default=None, description="Q area (process outputs).")
+
+    def areas(self) -> list[tuple[str, int, S7Area]]:
+        """``(area code, number, area)`` for every configured area."""
+        out: list[tuple[str, int, S7Area]] = [("DB", db.number, db) for db in self.data_blocks]
+        for code, area in (("MK", self.merkers), ("PE", self.inputs), ("PA", self.outputs)):
+            if area is not None:
+                out.append((code, 0, area))
+        return out
+
+    def point_names(self) -> list[str]:
+        return [p.name for _, _, area in self.areas() for p in area.points]
+
+    @model_validator(mode="after")
+    def _check(self) -> S7DeviceSpec:
+        numbers = [db.number for db in self.data_blocks]
+        duplicates = sorted({n for n in numbers if numbers.count(n) > 1})
+        if duplicates:
+            raise ValueError(f"duplicate data block number(s): {duplicates}")
+        checks: dict[str, ValueCheck] = {}
+        for _, _, area in self.areas():
+            for point in area.points:
+                if point.name in checks:
+                    raise ValueError(f"duplicate point name {point.name!r}")
+                checks[point.name] = partial(coerce_s7, data_type=point.type)
+        _check_behaviour(self.protocol, self.faults, self.scenario, checks)
+        return self
+
+
+DeviceSpec = Annotated[
+    ModbusDeviceSpec | OpcUaDeviceSpec | S7DeviceSpec, Field(discriminator="protocol")
+]
 """Any kind of device."""
 
-AnyDeviceSpec = ModbusDeviceSpec | OpcUaDeviceSpec
+AnyDeviceSpec = ModbusDeviceSpec | OpcUaDeviceSpec | S7DeviceSpec
 
 
 class SimulationConfig(_Model):
@@ -771,6 +904,7 @@ _UNION_TAGS = {
     "modbus_tcp",
     "modbus_rtu_over_tcp",
     "opcua",
+    "s7",
     "folder",
     "variable",
 }

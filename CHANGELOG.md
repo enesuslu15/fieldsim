@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); until 1.0 minor versions may change
 the file format.
 
+## [0.4.0] - unreleased
+
+### Added
+
+- **Siemens S7 devices** (`protocol: s7`, install `fieldsim[s7]`), experimental: data
+  blocks, merkers, inputs and outputs with BOOL/BYTE/WORD/DWORD/SINT/USINT/INT/UINT/
+  DINT/UDINT/REAL/LREAL points, generators, scenarios, outages and a write log, built on
+  the pure-Python python-snap7 server.
+- S7 faults through a TPKT/S7comm-aware proxy: `latency`, `drop`, `disconnect` and
+  `corrupt`, filtered by the services `Read` and `Write`.
+- `s7_device` and `make_s7_device` fixtures; `rack`, `slot` and `address_of()` (Siemens
+  notation such as `DB10.DBD0`) on device handles; `fieldsim init --protocol s7`.
+- `fieldsim[all]` extra; the Docker image now includes S7 support.
+- Documentation site (MkDocs Material) with guides, a configuration reference generated
+  from the schema, the Python API, architecture notes and a guide to adding protocols.
+- Contributing guide, code of conduct, security policy, issue and pull request
+  templates and Dependabot configuration.
+
 ## [0.3.0] - 2026-11-09
 
 ### Added

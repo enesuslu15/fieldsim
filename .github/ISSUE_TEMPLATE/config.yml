@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://enesuslu15.github.io/fieldsim/
+    about: Guides for device files, faults, scenarios and the pytest plugin.
+  - name: Security vulnerability
+    url: https://github.com/enesuslu15/fieldsim/security/advisories/new
+    about: Please report security problems privately.

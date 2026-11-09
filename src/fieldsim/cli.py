@@ -135,13 +135,37 @@ devices:
     scenario:
       - { at: 60s, offline: 10s }
 """,
+    "s7": """# fieldsim device file - see https://github.com/enesuslu15/fieldsim
+version: 1
+devices:
+  - name: press
+    protocol: s7                # experimental
+    port: 1102                  # 102 is the standard port but needs root on Linux
+    rack: 0
+    slot: 1
+    data_blocks:
+      - number: 1
+        points:
+          - name: pressure
+            offset: 0
+            type: REAL
+            generator: { type: sine, min: 180, max: 220, period: 10s }
+          - { name: cycles, offset: 4, type: DINT }
+          - { name: running, offset: 8, bit: 0, type: BOOL, value: true }
+          - { name: setpoint, offset: 10, type: INT, value: 200 }
+    merkers:
+      size: 16
+    faults: []                  # e.g. - { type: latency, delay: 50ms, services: [Read] }
+""",
 }
 
 
 @app.command()
 def init(
     path: Annotated[Path, typer.Argument(help="File to create.")] = Path("fieldsim.yaml"),
-    protocol: Annotated[str, typer.Option("--protocol", "-p", help="modbus or opcua.")] = "modbus",
+    protocol: Annotated[
+        str, typer.Option("--protocol", "-p", help="modbus, opcua or s7.")
+    ] = "modbus",
     force: Annotated[bool, typer.Option("--force", help="Overwrite an existing file.")] = False,
 ) -> None:
     """Write a starter simulation file."""

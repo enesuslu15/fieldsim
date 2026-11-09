@@ -1,0 +1,23 @@
+name: Feature request
+description: A new fault, protocol feature, generator or anything else.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to test?
+      description: Describe the situation in your software that fieldsim cannot reproduce yet.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: How could it look?
+      description: Optional. A sketch of the YAML or Python API you would like.
+      render: yaml
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Contributing
+      options:
+        - label: I would like to implement this myself

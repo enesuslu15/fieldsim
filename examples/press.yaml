@@ -1,0 +1,32 @@
+# A hydraulic press controlled by a Siemens S7 PLC (experimental): run it with
+#   fieldsim run examples/press.yaml
+# and connect any S7 client to 127.0.0.1:1102, rack 0, slot 1.
+# (102 is the standard ISO-on-TCP port, but binding it needs root on Linux.)
+version: 1
+devices:
+  - name: press-plc
+    protocol: s7
+    port: 1102
+    rack: 0
+    slot: 1
+    data_blocks:
+      - number: 10
+        points:
+          - name: pressure              # DB10.DBD0
+            offset: 0
+            type: REAL
+            description: Cylinder pressure in bar
+            generator: { type: sine, min: 180, max: 220, period: 10s }
+          - { name: cycles, offset: 4, type: DINT }                         # DB10.DBD4
+          - { name: running, offset: 8, bit: 0, type: BOOL, value: true }   # DB10.DBX8.0
+          - { name: door_open, offset: 8, bit: 1, type: BOOL }              # DB10.DBX8.1
+          - { name: setpoint, offset: 10, type: INT, value: 200 }           # DB10.DBW10
+    merkers:
+      size: 16
+      points:
+        - { name: alarm, offset: 0, bit: 0, type: BOOL }                    # M0.0
+
+    scenario:
+      - { at: 20s, set: { door_open: true, running: false, alarm: true } }
+      - { at: 30s, set: { door_open: false, running: true, alarm: false } }
+      - { at: 45s, offline: 5s }
