@@ -222,3 +222,51 @@ def test_setup_errors_are_reported_cleanly(project, test_source, message):
 def test_marker_is_registered(project):
     result = project.runpytest("--markers")
     result.stdout.fnmatch_lines(["@pytest.mark.fieldsim(config=None, *, device=None*"])
+
+
+LINE = textwrap.dedent(
+    """
+    devices:
+      - name: line
+        protocol: opcua
+        port: 4840
+        nodes:
+          - {name: Speed, type: Double, value: 1.25, writable: true}
+    """
+)
+
+
+def test_opcua_fixtures(project):
+    project.makefile(".yaml", line=LINE)
+    project.makepyfile(
+        """
+        import pytest
+        from asyncua import Client
+
+        async def read(handle, point):
+            async with Client(handle.endpoint, timeout=2) as client:
+                return await client.get_node(handle.node_id(point)).read_value()
+
+        @pytest.mark.fieldsim("line.yaml")
+        @pytest.mark.asyncio
+        async def test_from_file(opcua_device):
+            assert opcua_device.port != 4840
+            assert await read(opcua_device, "Speed") == 1.25
+
+        def test_zero_config(opcua_device):
+            assert opcua_device.endpoint.startswith("opc.tcp://")
+            assert opcua_device.protocol == "opcua"
+
+        @pytest.mark.asyncio
+        async def test_factory(make_opcua_device):
+            line = make_opcua_device(nodes=[{"name": "X", "type": "Int32", "value": 3}])
+            assert await read(line, "X") == 3
+
+        @pytest.mark.fieldsim("plant.yaml")
+        def test_no_opcua_device(opcua_device):
+            pass
+        """
+    )
+    result = project.runpytest("-p", "no:cacheprovider")
+    result.assert_outcomes(passed=3, errors=1)
+    result.stdout.fnmatch_lines(["*opcua_device needs exactly one OPC UA device, found: none*"])

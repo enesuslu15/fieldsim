@@ -1,0 +1,28 @@
+# Run the simulated plant next to the software under test:
+#   docker compose -f examples/docker-compose.yml up
+services:
+  plant:
+    image: ghcr.io/enesuslu15/fieldsim:latest
+    command: ["run", "/config/devices.yaml", "--host", "0.0.0.0"]
+    volumes:
+      - ./boiler.yaml:/config/devices.yaml:ro
+    ports:
+      - "5020:5020"
+
+  line:
+    image: ghcr.io/enesuslu15/fieldsim:latest
+    command: ["run", "/config/devices.yaml", "--host", "0.0.0.0"]
+    volumes:
+      - ./packaging_line.yaml:/config/devices.yaml:ro
+    ports:
+      - "4840:4840"
+
+  # gateway:
+  #   build: ../my-gateway
+  #   environment:
+  #     MODBUS_HOST: plant
+  #     MODBUS_PORT: "5020"
+  #     OPCUA_ENDPOINT: opc.tcp://line:4840/
+  #   depends_on:
+  #     plant: { condition: service_healthy }
+  #     line: { condition: service_healthy }

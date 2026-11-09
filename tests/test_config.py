@@ -66,7 +66,9 @@ def test_unknown_key_is_rejected():
 
 
 def test_unknown_protocol():
-    assert "devices[0].protocol" in errors_of(config(device(protocol="profinet")))
+    msg = errors_of(config(device(protocol="profinet")))
+    assert "devices[0]: Input tag 'profinet'" in msg
+    assert "'modbus_tcp', 'modbus_rtu_over_tcp', 'opcua'" in msg
 
 
 def test_devices_required():
@@ -269,3 +271,111 @@ def test_corrupt_mode_must_fit_protocol(protocol, mode, message):
 def test_fault_errors_have_clean_locations():
     msg = errors_of(config(device(faults=[{"type": "latency"}])))
     assert "devices[0].faults[0].delay: Field required" in msg
+
+
+# --------------------------------------------------------------------------- OPC UA
+
+OPCUA_NODES = [
+    {
+        "name": "Line1",
+        "nodes": [
+            {"name": "Speed", "type": "Double", "value": 1.5},
+            {"name": "Name", "type": "String", "value": "a"},
+        ],
+    },
+    {"name": "Count", "type": "UInt16", "node_id": "i=7"},
+]
+
+
+def opcua(**overrides):
+    data = {"name": "line", "protocol": "opcua", "nodes": OPCUA_NODES}
+    data.update(overrides)
+    return data
+
+
+def test_opcua_device_parses():
+    dev = parse_config(config(opcua())).devices[0]
+    assert dev.port == 4840
+    assert dev.point_names() == ["Line1.Speed", "Line1.Name", "Count"]
+    assert dev.namespace_uri == "urn:fieldsim:line"
+    assert dev.endpoint() == "opc.tcp://127.0.0.1:4840/"
+    assert dev.endpoint(host="h", port=1) == "opc.tcp://h:1/"
+    assert parse_config(config(opcua(namespace="urn:x"))).devices[0].namespace_uri == "urn:x"
+
+
+def test_mixed_protocols_in_one_file():
+    cfg = parse_config(config(device(), opcua(port=4841)))
+    assert [d.protocol for d in cfg.devices] == ["modbus_tcp", "opcua"]
+
+
+@pytest.mark.parametrize(
+    ("nodes", "message"),
+    [
+        ([{"name": "A"}, {"name": "A"}], "duplicate node name 'A'"),
+        (
+            [{"name": "F", "nodes": [{"name": "x"}, {"name": "x"}]}],
+            "nodes.F: duplicate node name 'x'",
+        ),
+        ([{"name": "a", "node_id": "i=1"}, {"name": "b", "node_id": "i=1"}], "share node id 'i=1'"),
+        ([{"name": "a.b"}], "nodes[0].name"),
+        ([{"name": "a", "type": "Int16", "value": 1e6}], "out of range for Int16"),
+        ([{"name": "a", "type": "String", "value": 3}], "expected a string"),
+        ([{"name": "a", "node_id": "x=1"}], "node_id"),
+        (
+            [{"name": "a", "type": "String", "generator": {"type": "constant", "value": 1}}],
+            "String variables cannot have a generator",
+        ),
+        ([{"name": "a", "type": "Decimal"}], "nodes[0].type"),
+    ],
+)
+def test_opcua_node_validation(nodes, message):
+    assert message in errors_of(config(opcua(nodes=nodes)))
+
+
+def test_opcua_scenario_values_are_type_checked():
+    ok = [{"at": 1, "set": {"Line1.Name": "b", "Line1.Speed": 2}}]
+    parse_config(config(opcua(scenario=ok)))
+    bad = [{"at": 1, "set": {"Line1.Name": 5}}]
+    assert "scenario[0]: Line1.Name: expected a string" in errors_of(config(opcua(scenario=bad)))
+
+
+@pytest.mark.parametrize(
+    ("fault", "message"),
+    [
+        ({"type": "exception"}, "use 'status' with OPC UA"),
+        ({"type": "drop", "function_codes": [3]}, "use 'services' with OPC UA"),
+        ({"type": "corrupt", "mode": "transaction_id"}, "does not exist for OPC UA"),
+        ({"type": "status", "code": "Good"}, "start with 'Bad' or 'Uncertain'"),
+        ({"type": "status", "code": 0}, "32-bit unsigned"),
+        ({"type": "drop", "services": ["Teleport"]}, "faults[0].services[0]"),
+    ],
+)
+def test_opcua_fault_validation(fault, message):
+    assert message in errors_of(config(opcua(faults=[fault])))
+
+
+def test_opcua_faults_parse():
+    faults = [
+        {"type": "status", "code": "BadTimeout", "services": ["Read", "Write"]},
+        {"type": "status", "code": 2148139008},
+        {"type": "corrupt", "mode": "bad_length"},
+    ]
+    assert len(parse_config(config(opcua(faults=faults))).devices[0].faults) == 3
+
+
+@pytest.mark.parametrize(
+    ("fault", "message"),
+    [
+        ({"type": "status"}, "use 'exception' with Modbus"),
+        ({"type": "drop", "services": ["Read"]}, "use 'function_codes' with Modbus"),
+    ],
+)
+def test_modbus_rejects_opcua_faults(fault, message):
+    assert message in errors_of(config(device(faults=[fault])))
+
+
+def test_modbus_scenario_rejects_strings():
+    regs = {"coils": [{"name": "run", "address": 0}]}
+    step = {"at": 1, "set": {"run": "on"}}
+    msg = errors_of(config(device(registers=regs, scenario=[step])))
+    assert "scenario[0]: run: expected a boolean, got a string" in msg

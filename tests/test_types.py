@@ -6,9 +6,11 @@ from fieldsim.core.types import (
     FLOAT32_MAX,
     REGISTER_TYPES,
     coerce,
+    coerce_opcua,
     decode,
     encode,
     is_integer_type,
+    opcua_default,
     register_count,
 )
 
@@ -105,3 +107,50 @@ class TestCoerce:
     def test_non_number(self):
         with pytest.raises(TypeError, match="expected a number"):
             coerce("12", "int16")  # type: ignore[arg-type]
+
+
+class TestCoerceOpcUa:
+    @pytest.mark.parametrize(
+        ("value", "data_type", "expected"),
+        [
+            (True, "Boolean", True),
+            (0, "Boolean", False),
+            ("x", "String", "x"),
+            (127, "SByte", 127),
+            (255.0, "Byte", 255),
+            (1.5, "Double", 1.5),
+            (2, "Float", 2.0),
+            (True, "Int32", 1),
+        ],
+    )
+    def test_valid(self, value, data_type, expected):
+        result = coerce_opcua(value, data_type)
+        assert result == expected
+        assert type(result) is type(expected)
+
+    @pytest.mark.parametrize(
+        ("value", "data_type", "error", "message"),
+        [
+            (128, "SByte", ValueError, "out of range for SByte"),
+            (1.5, "Int16", ValueError, "whole number"),
+            (1e40, "Float", ValueError, "out of range for Float"),
+            (5, "String", TypeError, "expected a string"),
+            ("5", "Int32", TypeError, "expected a number for Int32"),
+            ("yes", "Boolean", TypeError, "expected a number for Boolean"),
+            (None, "Double", TypeError, "expected a number"),
+        ],
+    )
+    def test_invalid(self, value, data_type, error, message):
+        with pytest.raises(error, match=message):
+            coerce_opcua(value, data_type)
+
+    def test_clamp(self):
+        assert coerce_opcua(300.4, "Byte", clamp=True) == 255
+        assert coerce_opcua(-1e40, "Float", clamp=True) == -FLOAT32_MAX
+
+    @pytest.mark.parametrize(
+        ("data_type", "default"),
+        [("Boolean", False), ("String", ""), ("Double", 0.0), ("Float", 0.0), ("UInt64", 0)],
+    )
+    def test_defaults(self, data_type, default):
+        assert opcua_default(data_type) == default

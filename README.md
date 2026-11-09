@@ -2,17 +2,24 @@
 
 **Virtual industrial devices for testing software without hardware.**
 
-fieldsim starts fake Modbus devices (OPC UA and S7 are on the roadmap) from a YAML
+fieldsim starts fake Modbus and OPC UA devices (S7 is on the roadmap) from a YAML
 file, drives their values with generators, breaks them on purpose with fault
 injection and plays scripted scenarios — so you can test gateways, SCADA
 connectors and edge apps in CI, no PLC on your desk required.
 
-> Status: alpha (`0.2.0`). The file format may still change before 1.0.
+> Status: alpha (`0.3.0`). The file format may still change before 1.0.
 
 ## Install
 
 ```bash
-pip install fieldsim
+pip install fieldsim             # Modbus TCP / RTU over TCP
+pip install "fieldsim[opcua]"    # + OPC UA (uses asyncua)
+```
+
+or run it as a container:
+
+```bash
+docker run --rm -p 5020:5020 -v "$PWD/boiler.yaml:/config/devices.yaml:ro" ghcr.io/enesuslu15/fieldsim
 ```
 
 ## Test with pytest
@@ -73,13 +80,29 @@ def test_overheat_alarm(modbus_device):
     ...
 ```
 
+OPC UA works the same way:
+
+```python
+@pytest.mark.fieldsim("packaging_line.yaml")
+async def test_reads_speed(opcua_device):
+    opcua_device.set("Line1.Speed", 1.05)
+    async with Client(opcua_device.endpoint) as client:
+        assert await client.get_node(opcua_device.node_id("Line1.Speed")).read_value() == 1.05
+
+
+@pytest.mark.fieldsim("packaging_line.yaml")
+async def test_reports_timeouts(opcua_device):
+    with opcua_device.fault("status", code="BadTimeout", services=["Read"]):
+        ...
+```
+
 Fixtures and options:
 
 | | |
 |---|---|
-| `modbus_device` | The Modbus device of the simulation (choose with `mark.fieldsim(device="name")` if there are several). |
+| `modbus_device`, `opcua_device` | The Modbus / OPC UA device of the simulation (choose with `mark.fieldsim(device="name")` if there are several). |
 | `fieldsim` | The whole running simulation: `fieldsim["plc-1"]`, `fieldsim.advance(10)`. |
-| `make_modbus_device` | Factory for ad-hoc devices: `make_modbus_device(registers={...}, unit_id=3)`. |
+| `make_modbus_device`, `make_opcua_device` | Factories for ad-hoc devices: `make_modbus_device(registers={...}, unit_id=3)`. |
 | `@pytest.mark.fieldsim(config, device=, clock=, free_ports=)` | Per-test configuration. `config` is a YAML path (relative to the test file or rootdir) or a dict. |
 | ini `fieldsim_config`, `fieldsim_clock`, `fieldsim_free_ports` | Project-wide defaults. |
 
@@ -116,23 +139,54 @@ devices:
       - { at: 90s, release: [temperature] }
 ```
 
-Run it standalone, e.g. as a service container in CI:
+An OPC UA device is a tree of folders and variables; a variable's point name is
+its dotted path and its node id `ns=<index>;s=<path>` unless you set `node_id`:
 
-```bash
-fieldsim validate boiler.yaml
-fieldsim run boiler.yaml
+```yaml
+  - name: packaging-line
+    protocol: opcua
+    port: 4840                    # endpoint opc.tcp://127.0.0.1:4840/
+    nodes:
+      - name: Line1
+        nodes:
+          - { name: Speed, type: Double, generator: { type: sine, min: 0.8, max: 1.2, period: 20s } }
+          - { name: Setpoint, type: Int32, value: 120, writable: true }
+          - { name: Product, type: String, value: A-100, writable: true, node_id: "i=1001" }
+    scenario:
+      - { at: 40s, fault: { type: status, code: BadTimeout, services: [Read] }, duration: 5s }
 ```
 
-Get a JSON Schema for editor autocompletion with `fieldsim schema -o fieldsim.schema.json`.
+Variable types: `Boolean SByte Byte Int16 UInt16 Int32 UInt32 Int64 UInt64 Float Double String`.
+Values set from code or written by clients are pushed to subscriptions.
+
+## Command line
+
+```bash
+fieldsim init plant.yaml --protocol opcua   # starter file (modbus or opcua)
+fieldsim validate plant.yaml                # check without starting
+fieldsim run plant.yaml --host 0.0.0.0      # serve until Ctrl+C (--duration N to stop)
+fieldsim check plant.yaml --wait 30         # exit 0 once every device accepts connections
+fieldsim schema -o fieldsim.schema.json     # JSON Schema for editor autocompletion
+```
+
+## Docker and CI
+
+The image `ghcr.io/enesuslu15/fieldsim` (amd64, arm64) runs
+`fieldsim run /config/devices.yaml --host 0.0.0.0` and has a health check, so
+other services can wait for it with `depends_on: {condition: service_healthy}`.
+See [`examples/docker-compose.yml`](examples/docker-compose.yml) and, for GitHub
+Actions with either the pytest plugin or the container,
+[`examples/github-actions.yml`](examples/github-actions.yml).
 
 ### Device options
 
 | Key | Meaning |
 |---|---|
-| `protocol` | `modbus_tcp`, or `modbus_rtu_over_tcp` for RTU frames (with CRC) tunnelled over TCP. |
+| `protocol` | `modbus_tcp`, `modbus_rtu_over_tcp` (RTU frames with CRC tunnelled over TCP) or `opcua`. |
 | `host`, `port` | Listen address. `port: 0` picks a free port. |
-| `unit_id` | Only answer this unit id (default: answer all). |
-| `unmapped` | `error` (exception 02 for undefined addresses, default) or `allow` (plain memory). |
+| `unit_id` | Modbus: only answer this unit id (default: answer all). |
+| `unmapped` | Modbus: `error` (exception 02 for undefined addresses, default) or `allow` (plain memory). |
+| `path`, `namespace` | OPC UA: endpoint URL path (default `/`) and namespace URI. |
 | `update_interval` | Generator refresh rate, e.g. `100ms`. |
 | `faults` | Faults active from the start (see below). |
 | `scenario` | Timed steps: `set`, `release`, `fault` (+ `duration`), `offline`. |
@@ -153,11 +207,17 @@ Generators: `constant`, `sine`, `ramp` (`sawtooth` / `triangle` / `once`),
 | `latency` | Delay responses by `delay` + random `0..jitter`. |
 | `drop` | No response. `executed: true` still performs the request (lost reply). |
 | `disconnect` | Close the connection instead of answering. |
-| `exception` | Answer with Modbus exception `code` (default 6, SERVER DEVICE BUSY). |
-| `corrupt` | Damage the response: `bit_flip`, `truncate`, `garbage`, `bad_length` (TCP), `transaction_id` (TCP), `bad_crc` (RTU). |
+| `exception` | Modbus: answer with exception `code` (default 6, SERVER DEVICE BUSY). |
+| `status` | OPC UA: answer with a ServiceFault carrying `code` (e.g. `BadTimeout`). |
+| `corrupt` | Damage the response: `bit_flip`, `truncate`, `garbage`, `bad_length` (Modbus TCP, OPC UA), `transaction_id` (Modbus TCP), `bad_crc` (Modbus RTU). |
 
-Every fault accepts `probability` (0..1), `function_codes` (list) and `count`
-(remove after N hits).
+Every fault accepts `probability` (0..1), `count` (remove after N hits) and a
+filter: `function_codes` for Modbus, `services` (`Read`, `Write`, `Browse`,
+`Publish`, ...) for OPC UA.
+
+OPC UA faults are applied by a small proxy in front of the server that matches
+responses to requests and renumbers the secure channel's sequence numbers, so a
+dropped or injected message never breaks the session by itself.
 
 ## Use from Python
 

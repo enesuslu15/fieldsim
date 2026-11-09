@@ -4,7 +4,35 @@ All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); until 1.0 minor versions may change
 the file format.
 
-## [0.2.0] - unreleased
+## [0.3.0] - unreleased
+
+### Added
+
+- **OPC UA devices** (`protocol: opcua`, install `fieldsim[opcua]`): a tree of folders and
+  variables (Boolean, integer, Float, Double, String), generators, subscriptions, client
+  writes in the write log, scenarios and outages, built on asyncua.
+- OPC UA faults through a request-aware proxy: `latency`, `drop`, `disconnect`, `corrupt`
+  and the new `status` fault (ServiceFault with any StatusCode), filtered by `services`.
+- `opcua_device` and `make_opcua_device` pytest fixtures; `endpoint` and `node_id()` on
+  device handles.
+- CLI: `fieldsim init` (starter files), `fieldsim check` (health check / wait for devices)
+  and `fieldsim run --host`.
+- Docker image on `ghcr.io/enesuslu15/fieldsim` (amd64 + arm64) with a health check;
+  docker compose and GitHub Actions examples.
+
+### Changed
+
+- The write log (`writes`, `wait_for_write`) moved to the common `Device` class.
+- Scenario `set` steps accept strings (for OPC UA String variables); Modbus points reject them.
+- CI actions updated to their Node 24 releases.
+
+### Performance
+
+- OPC UA's standard address space is built once per process and copied for later
+  devices: device start-up drops from ~1.4 s to ~0.3 s, and from ~35 s to ~0.5 s under a
+  coverage tracer.
+
+## [0.2.0] - 2026-11-08
 
 ### Added
 

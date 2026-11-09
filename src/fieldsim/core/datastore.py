@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Protocol
 
-Value = bool | int | float
+Value = bool | int | float | str
+"""A point value. Strings only exist on protocols that have them (OPC UA)."""
 
 
 class PointNotFoundError(KeyError):

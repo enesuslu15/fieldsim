@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from types import TracebackType
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Protocol, TypeVar
 
 from fieldsim.config import FaultSpec, ScenarioStep
 from fieldsim.core.clock import Clock, RealClock
@@ -17,6 +19,13 @@ from fieldsim.core.generators import Generator
 from fieldsim.core.scenario import ScenarioRunner
 
 StoreT = TypeVar("StoreT", bound=PointStore)
+
+
+class WriteRecord(Protocol):
+    """A write performed by a client. Each protocol adds its own details."""
+
+    @property
+    def points(self) -> tuple[str, ...]: ...
 
 
 class Device(ABC, Generic[StoreT]):
@@ -57,6 +66,10 @@ class Device(ABC, Generic[StoreT]):
         self.scenario = ScenarioRunner(self, scenario, self.clock)
         self._running = False
         self._online = False
+        #: Every client write, in order. Protocols append via :meth:`_record_write`.
+        self.writes: list[Any] = []
+        self._write_cursor = 0
+        self._write_signal = asyncio.Event()
 
     # ------------------------------------------------------------------ network
 
@@ -77,7 +90,11 @@ class Device(ABC, Generic[StoreT]):
     async def _start_server(self) -> None: ...
 
     @abstractmethod
-    async def _stop_server(self) -> None: ...
+    async def _stop_server(self) -> None:
+        """Stop accepting clients. Also used for outages, so it must be restartable."""
+
+    async def _shutdown(self) -> None:
+        """Release everything else when the device stops for good. Optional."""
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -93,7 +110,11 @@ class Device(ABC, Generic[StoreT]):
     async def start(self) -> None:
         if self._running:
             return
-        await self._start_server()
+        try:
+            await self._start_server()
+        except BaseException:
+            await self._shutdown()
+            raise
         self._online = True
         self._running = True
         self._engine.start()
@@ -108,6 +129,7 @@ class Device(ABC, Generic[StoreT]):
         if self._online:
             self._online = False
             await self._stop_server()
+        await self._shutdown()
 
     async def go_offline(self) -> None:
         """Simulate a power or network loss: drop every client and refuse new ones.
@@ -175,6 +197,41 @@ class Device(ABC, Generic[StoreT]):
 
     def clear_faults(self) -> None:
         self.faults.clear()
+
+    # ------------------------------------------------------------------ write log
+
+    def _record_write(self, event: WriteRecord) -> None:
+        self.writes.append(event)
+        self._write_signal.set()
+
+    def clear_writes(self) -> None:
+        self.writes.clear()
+        self._write_cursor = 0
+
+    async def wait_for_write(self, point: str | None = None, timeout: float = 5.0) -> Any:
+        """Wait for a client write (touching ``point``, if given) and return it.
+
+        Writes are consumed in order: each call returns the first matching write
+        after the one the previous call returned, including writes that happened
+        before the call. Raises :class:`TimeoutError` if none arrives in time.
+        """
+        if point is not None:
+            self.store.get(point)  # validates the name
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            for index in range(self._write_cursor, len(self.writes)):
+                event = self.writes[index]
+                if point is None or point in event.points:
+                    self._write_cursor = index + 1
+                    return event
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                target = f"to {point!r} " if point else ""
+                raise TimeoutError(f"no write {target}within {timeout}s on {self.name!r}")
+            self._write_signal.clear()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._write_signal.wait(), remaining)
 
     # ------------------------------------------------------------------ values
 

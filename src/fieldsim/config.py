@@ -22,7 +22,8 @@ of surfacing as a confusing protocol error at runtime.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -31,14 +32,23 @@ from pydantic import (
     BaseModel,
     BeforeValidator,
     ConfigDict,
+    Discriminator,
     Field,
+    Tag,
     ValidationError,
     WithJsonSchema,
     field_validator,
     model_validator,
 )
 
-from fieldsim.core.types import Order, RegisterType, coerce, register_count
+from fieldsim.core.types import (
+    OpcUaType,
+    Order,
+    RegisterType,
+    coerce,
+    coerce_opcua,
+    register_count,
+)
 
 # --------------------------------------------------------------------------- primitives
 
@@ -269,13 +279,46 @@ class RegisterMap(_Model):
 
 # --------------------------------------------------------------------------- faults
 
+OPCUA_SERVICES = (
+    "Read",
+    "Write",
+    "Browse",
+    "BrowseNext",
+    "TranslateBrowsePathsToNodeIds",
+    "RegisterNodes",
+    "UnregisterNodes",
+    "Call",
+    "CreateSubscription",
+    "ModifySubscription",
+    "DeleteSubscriptions",
+    "SetPublishingMode",
+    "Publish",
+    "Republish",
+    "CreateMonitoredItems",
+    "ModifyMonitoredItems",
+    "DeleteMonitoredItems",
+    "SetMonitoringMode",
+    "HistoryRead",
+    "HistoryUpdate",
+    "GetEndpoints",
+    "FindServers",
+    "CreateSession",
+    "ActivateSession",
+    "CloseSession",
+    "Cancel",
+)
+OpcUaService = Literal[OPCUA_SERVICES]  # type: ignore[valid-type]
+
 
 class _Fault(_Model):
     probability: float = Field(
         default=1.0, ge=0, le=1, description="Chance that a matching request is affected."
     )
     function_codes: list[Annotated[int, Field(ge=1, le=127)]] | None = Field(
-        default=None, description="Only affect these function codes (default: all)."
+        default=None, description="Modbus: only affect these function codes (default: all)."
+    )
+    services: list[OpcUaService] | None = Field(
+        default=None, description="OPC UA: only affect these services, e.g. [Read, Write]."
     )
     count: int | None = Field(
         default=None, ge=1, description="Remove the fault after it affected this many requests."
@@ -305,25 +348,46 @@ class DisconnectFault(_Fault):
 
 
 class ExceptionFault(_Fault):
-    """Answer with a Modbus exception code instead of the real response."""
+    """Modbus: answer with an exception code instead of the real response."""
 
     type: Literal["exception"]
     code: int = Field(default=6, ge=1, le=255, description="6 = SERVER DEVICE BUSY")
+
+
+class StatusFault(_Fault):
+    """OPC UA: answer with a ServiceFault carrying a bad status code."""
+
+    type: Literal["status"]
+    code: str | int = Field(
+        default="BadCommunicationError",
+        description="StatusCode name such as 'BadTimeout', or its numeric value.",
+    )
+
+    @field_validator("code")
+    @classmethod
+    def _valid(cls, v: str | int) -> str | int:
+        if isinstance(v, str) and not re.fullmatch(r"(Bad|Uncertain)[A-Za-z0-9]+", v):
+            raise ValueError("status code names start with 'Bad' or 'Uncertain'")
+        if isinstance(v, int) and not 0 < v <= 0xFFFFFFFF:
+            raise ValueError("status code must be a 32-bit unsigned value")
+        return v
 
 
 CorruptMode = Literal["bit_flip", "truncate", "garbage", "bad_length", "transaction_id", "bad_crc"]
 
 TCP_ONLY_CORRUPT_MODES = frozenset({"bad_length", "transaction_id"})
 RTU_ONLY_CORRUPT_MODES = frozenset({"bad_crc"})
+OPCUA_CORRUPT_MODES = frozenset({"bit_flip", "truncate", "garbage", "bad_length"})
 
 
 class CorruptFault(_Fault):
     """Send a damaged response.
 
-    ``bit_flip`` flips one random bit of the PDU, ``truncate`` sends only part of
-    the frame, ``garbage`` replaces it with random bytes of the same length,
-    ``bad_length`` (TCP) breaks the MBAP length field, ``transaction_id`` (TCP)
-    answers with the wrong transaction id and ``bad_crc`` (RTU) breaks the CRC.
+    ``bit_flip`` flips one random bit of the payload, ``truncate`` sends only part
+    of the message, ``garbage`` replaces it with random bytes of the same length,
+    ``bad_length`` breaks the length field (Modbus TCP, OPC UA),
+    ``transaction_id`` (Modbus TCP) answers with the wrong transaction id and
+    ``bad_crc`` (Modbus RTU) breaks the CRC.
     """
 
     type: Literal["corrupt"]
@@ -331,9 +395,41 @@ class CorruptFault(_Fault):
 
 
 FaultSpec = Annotated[
-    LatencyFault | DropFault | DisconnectFault | ExceptionFault | CorruptFault,
+    LatencyFault | DropFault | DisconnectFault | ExceptionFault | StatusFault | CorruptFault,
     Field(discriminator="type"),
 ]
+
+MODBUS_PROTOCOLS = frozenset({"modbus_tcp", "modbus_rtu_over_tcp"})
+
+
+def check_fault(fault: FaultSpec, protocol: str) -> None:
+    """Reject faults that cannot happen with ``protocol``."""
+    if protocol in MODBUS_PROTOCOLS:
+        if isinstance(fault, StatusFault):
+            raise ValueError("'status' faults are for OPC UA; use 'exception' with Modbus")
+        if fault.services is not None:
+            raise ValueError("'services' filters OPC UA services; use 'function_codes' with Modbus")
+        if isinstance(fault, CorruptFault):
+            if protocol == "modbus_tcp" and fault.mode in RTU_ONLY_CORRUPT_MODES:
+                raise ValueError(
+                    f"corrupt mode {fault.mode!r} needs RTU framing (CRC); "
+                    "use it with modbus_rtu_over_tcp"
+                )
+            if protocol == "modbus_rtu_over_tcp" and fault.mode in TCP_ONLY_CORRUPT_MODES:
+                raise ValueError(f"corrupt mode {fault.mode!r} only exists in Modbus TCP framing")
+    elif protocol == "opcua":
+        if isinstance(fault, ExceptionFault):
+            raise ValueError(
+                "'exception' faults are Modbus exception codes; use 'status' with OPC UA"
+            )
+        if fault.function_codes is not None:
+            raise ValueError("'function_codes' filters Modbus requests; use 'services' with OPC UA")
+        if isinstance(fault, CorruptFault) and fault.mode not in OPCUA_CORRUPT_MODES:
+            raise ValueError(
+                f"corrupt mode {fault.mode!r} does not exist for OPC UA "
+                f"(use one of: {', '.join(sorted(OPCUA_CORRUPT_MODES))})"
+            )
+
 
 # --------------------------------------------------------------------------- scenario
 
@@ -342,7 +438,7 @@ class ScenarioStep(_Model):
     """One timed action. Exactly one of ``set``, ``release``, ``fault`` or ``offline``."""
 
     at: Duration = Field(description="Time since the device started.")
-    set: dict[str, bool | int | float] | None = Field(
+    set: dict[str, bool | int | float | str] | None = Field(
         default=None, description="Point values to set (pauses their generators)."
     )
     release: list[str] | None = Field(
@@ -373,33 +469,51 @@ class ScenarioStep(_Model):
         return self
 
 
+ValueCheck = Callable[[Any], object]
+
+
+def _check_behaviour(
+    protocol: str,
+    faults: list[FaultSpec],
+    scenario: list[ScenarioStep],
+    checks: Mapping[str, ValueCheck],
+) -> None:
+    """Validate faults and scenario steps against a device's points and protocol."""
+    all_faults = list(faults)
+    for i, step in enumerate(scenario):
+        where = f"scenario[{i}]"
+        for name, value in (step.set or {}).items():
+            check = checks.get(name)
+            if check is None:
+                raise ValueError(f"{where}: unknown point {name!r}")
+            try:
+                check(value)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"{where}: {name}: {exc}") from None
+        for name in step.release or []:
+            if name not in checks:
+                raise ValueError(f"{where}: unknown point {name!r}")
+        if step.fault is not None:
+            all_faults.append(step.fault)
+    for fault in all_faults:
+        check_fault(fault, protocol)
+
+
+def _check_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        raise TypeError("expected a boolean, got a string")
+    return bool(value)
+
+
 # --------------------------------------------------------------------------- devices
 
 
-class ModbusDeviceSpec(_Model):
-    """A Modbus server reachable over TCP (native Modbus TCP or RTU framing over TCP)."""
-
+class _DeviceBase(_Model):
     name: Name
-    protocol: Literal["modbus_tcp", "modbus_rtu_over_tcp"]
     host: str = "127.0.0.1"
-    port: int = Field(default=502, ge=0, le=65535, description="0 picks a free port.")
-    unit_id: int | None = Field(
-        default=None,
-        ge=0,
-        le=255,
-        description="Only answer requests for this unit id. Omit to answer every unit id.",
-    )
-    unmapped: Literal["error", "allow"] = Field(
-        default="error",
-        description=(
-            "'error' answers requests touching undefined addresses with exception 02 "
-            "(ILLEGAL DATA ADDRESS); 'allow' treats them as plain memory initialised to 0."
-        ),
-    )
     update_interval: Duration = Field(
         default=0.1, description="How often generators refresh their points."
     )
-    registers: RegisterMap = Field(default_factory=RegisterMap)
     faults: list[FaultSpec] = Field(
         default_factory=list, description="Faults active from the moment the device starts."
     )
@@ -417,46 +531,167 @@ class ModbusDeviceSpec(_Model):
             raise ValueError("update_interval must be > 0")
         return v
 
+
+class ModbusDeviceSpec(_DeviceBase):
+    """A Modbus server reachable over TCP (native Modbus TCP or RTU framing over TCP)."""
+
+    protocol: Literal["modbus_tcp", "modbus_rtu_over_tcp"]
+    port: int = Field(default=502, ge=0, le=65535, description="0 picks a free port.")
+    unit_id: int | None = Field(
+        default=None,
+        ge=0,
+        le=255,
+        description="Only answer requests for this unit id. Omit to answer every unit id.",
+    )
+    unmapped: Literal["error", "allow"] = Field(
+        default="error",
+        description=(
+            "'error' answers requests touching undefined addresses with exception 02 "
+            "(ILLEGAL DATA ADDRESS); 'allow' treats them as plain memory initialised to 0."
+        ),
+    )
+    registers: RegisterMap = Field(default_factory=RegisterMap)
+
+    def point_names(self) -> list[str]:
+        return [p.name for p in self.registers.all_points()]
+
     @model_validator(mode="after")
     def _check(self) -> ModbusDeviceSpec:
-        points = {p.name: p for p in self.registers.all_points()}
-        faults = list(self.faults)
-        for i, step in enumerate(self.scenario):
-            where = f"scenario[{i}]"
-            for name, value in (step.set or {}).items():
-                point = points.get(name)
-                if point is None:
-                    raise ValueError(f"{where}: unknown point {name!r}")
-                if isinstance(point, _RegisterPoint):
-                    try:
-                        coerce(value, point.type)
-                    except ValueError as exc:
-                        raise ValueError(f"{where}: {name}: {exc}") from None
-            for name in step.release or []:
-                if name not in points:
-                    raise ValueError(f"{where}: unknown point {name!r}")
-            if step.fault is not None:
-                faults.append(step.fault)
-        for fault in faults:
-            if isinstance(fault, CorruptFault):
-                check_corrupt_mode(fault.mode, self.protocol)
+        checks: dict[str, ValueCheck] = {}
+        for point in self.registers.all_points():
+            if isinstance(point, _RegisterPoint):
+                checks[point.name] = partial(coerce, data_type=point.type)
+            else:
+                checks[point.name] = _check_bool
+        _check_behaviour(self.protocol, self.faults, self.scenario, checks)
         return self
-
-
-def check_corrupt_mode(mode: str, protocol: str) -> None:
-    if protocol == "modbus_tcp" and mode in RTU_ONLY_CORRUPT_MODES:
-        raise ValueError(
-            f"corrupt mode {mode!r} needs RTU framing (CRC); use it with modbus_rtu_over_tcp"
-        )
-    if protocol == "modbus_rtu_over_tcp" and mode in TCP_ONLY_CORRUPT_MODES:
-        raise ValueError(f"corrupt mode {mode!r} only exists in Modbus TCP framing")
 
 
 ModbusTcpDevice = ModbusDeviceSpec
 """Backwards compatible alias."""
 
-DeviceSpec = ModbusDeviceSpec
-"""Union of all device kinds. Grows as protocols are added."""
+# --------------------------------------------------------------------------- OPC UA
+
+SegmentName = Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_\-]*$", max_length=128)]
+
+
+class OpcUaVariable(_Model):
+    """A variable node. Its point name is the dotted path from the device root."""
+
+    name: SegmentName
+    type: OpcUaType = "Double"
+    value: bool | int | float | str | None = Field(
+        default=None, description="Initial value (default: false, 0 or empty string)."
+    )
+    writable: bool = Field(default=False, description="Allow clients to write the value.")
+    description: str | None = None
+    generator: GeneratorSpec | None = None
+    node_id: str | None = Field(
+        default=None,
+        pattern=r"^(s=.+|i=\d+)$",
+        description="Identifier in the device namespace, e.g. 's=Temp' or 'i=1001'. "
+        "Default: s=<dotted path>.",
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> OpcUaVariable:
+        if self.value is not None:
+            try:
+                coerce_opcua(self.value, self.type)
+            except TypeError as exc:
+                raise ValueError(str(exc)) from None
+        if self.generator is not None and self.type == "String":
+            raise ValueError("String variables cannot have a generator")
+        return self
+
+
+class OpcUaFolder(_Model):
+    """An object node grouping other nodes."""
+
+    name: SegmentName
+    description: str | None = None
+    nodes: list[OpcUaNode] = Field(default_factory=list)
+
+
+def _node_kind(value: Any) -> str:
+    if isinstance(value, dict):
+        return "folder" if "nodes" in value else "variable"
+    return "folder" if isinstance(value, OpcUaFolder) else "variable"
+
+
+OpcUaNode = Annotated[
+    Annotated[OpcUaFolder, Tag("folder")] | Annotated[OpcUaVariable, Tag("variable")],
+    Discriminator(_node_kind),
+]
+OpcUaFolder.model_rebuild()
+
+
+def iter_opcua_variables(
+    nodes: list[OpcUaNode], prefix: str = ""
+) -> Iterator[tuple[str, OpcUaVariable]]:
+    """Yield ``(dotted path, variable)`` for every variable below ``nodes``."""
+    for node in nodes:
+        path = f"{prefix}.{node.name}" if prefix else node.name
+        if isinstance(node, OpcUaFolder):
+            yield from iter_opcua_variables(node.nodes, path)
+        else:
+            yield path, node
+
+
+class OpcUaDeviceSpec(_DeviceBase):
+    """An OPC UA server (binary protocol, security mode None)."""
+
+    protocol: Literal["opcua"]
+    port: int = Field(default=4840, ge=0, le=65535, description="0 picks a free port.")
+    path: str = Field(default="/", pattern=r"^/\S*$", description="Endpoint URL path.")
+    namespace: str | None = Field(
+        default=None,
+        description="Namespace URI of the device's nodes. Default: urn:fieldsim:<name>",
+    )
+    nodes: list[OpcUaNode] = Field(default_factory=list)
+
+    @property
+    def namespace_uri(self) -> str:
+        return self.namespace or f"urn:fieldsim:{self.name}"
+
+    def endpoint(self, host: str | None = None, port: int | None = None) -> str:
+        return f"opc.tcp://{host or self.host}:{self.port if port is None else port}{self.path}"
+
+    def variables(self) -> list[tuple[str, OpcUaVariable]]:
+        return list(iter_opcua_variables(self.nodes))
+
+    def point_names(self) -> list[str]:
+        return [path for path, _ in self.variables()]
+
+    @model_validator(mode="after")
+    def _check(self) -> OpcUaDeviceSpec:
+        _check_unique_names(self.nodes, "nodes")
+        node_ids: dict[str, str] = {}
+        checks: dict[str, ValueCheck] = {}
+        for path, var in self.variables():
+            node_id = var.node_id or f"s={path}"
+            if node_id in node_ids:
+                raise ValueError(f"{path!r} and {node_ids[node_id]!r} share node id {node_id!r}")
+            node_ids[node_id] = path
+            checks[path] = partial(coerce_opcua, data_type=var.type)
+        _check_behaviour(self.protocol, self.faults, self.scenario, checks)
+        return self
+
+
+def _check_unique_names(nodes: list[OpcUaNode], where: str) -> None:
+    seen: set[str] = set()
+    for node in nodes:
+        if node.name in seen:
+            raise ValueError(f"{where}: duplicate node name {node.name!r}")
+        seen.add(node.name)
+        if isinstance(node, OpcUaFolder):
+            _check_unique_names(node.nodes, f"{where}.{node.name}")
+
+
+DeviceSpec = Annotated[ModbusDeviceSpec | OpcUaDeviceSpec, Field(discriminator="protocol")]
+"""Any kind of device."""
+
+AnyDeviceSpec = ModbusDeviceSpec | OpcUaDeviceSpec
 
 
 class SimulationConfig(_Model):
@@ -530,7 +765,14 @@ _UNION_TAGS = {
     "drop",
     "disconnect",
     "exception",
+    "status",
     "corrupt",
+    # devices and OPC UA nodes
+    "modbus_tcp",
+    "modbus_rtu_over_tcp",
+    "opcua",
+    "folder",
+    "variable",
 }
 
 

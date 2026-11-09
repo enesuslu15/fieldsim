@@ -1,0 +1,39 @@
+# Two ways to use fieldsim in your own GitHub Actions workflow.
+# Copy the job you need into .github/workflows/ of your project.
+
+name: integration
+
+on: [push, pull_request]
+
+jobs:
+  # 1. pytest fixtures: nothing to start, the plugin runs the devices per test.
+  pytest-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install "fieldsim[opcua]" -e .
+      - run: pytest tests/integration
+
+  # 2. A long-running simulator for tests that are not written in Python
+  #    (Node, Go, .NET, ...) or for an end-to-end run of the real application.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start the simulated plant
+        run: |
+          docker run -d --name plant -p 5020:5020 \
+            -v "$PWD/tests/devices.yaml:/config/devices.yaml:ro" \
+            ghcr.io/enesuslu15/fieldsim:latest
+          docker run --rm --network host \
+            -v "$PWD/tests/devices.yaml:/config/devices.yaml:ro" \
+            ghcr.io/enesuslu15/fieldsim:latest check /config/devices.yaml --wait 30
+      - run: npm ci && npm run test:integration
+        env:
+          MODBUS_HOST: 127.0.0.1
+          MODBUS_PORT: "5020"
+      - if: always()
+        run: docker logs plant

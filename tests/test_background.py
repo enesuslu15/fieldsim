@@ -197,3 +197,18 @@ def test_fault_remove_after_stop_is_harmless():
     with BackgroundSimulator(config()) as sim:
         fault = sim["plc"].fault("drop")
     fault.remove()
+
+
+def test_opcua_only_attributes_on_modbus(sim):
+    with pytest.raises(AttributeError, match="no OPC UA endpoint"):
+        _ = sim["plc"].endpoint
+    with pytest.raises(AttributeError, match="no OPC UA node ids"):
+        sim["plc"].node_id("setpoint")
+
+
+def test_opcua_handle():
+    cfg = {"devices": [{"name": "l", "protocol": "opcua", "port": 0, "nodes": [{"name": "S"}]}]}
+    with BackgroundSimulator(cfg) as s:
+        handle = s["l"]
+        assert handle.endpoint.startswith("opc.tcp://127.0.0.1:")
+        assert handle.node_id("S").endswith(";s=S")

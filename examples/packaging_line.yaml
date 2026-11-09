@@ -1,0 +1,41 @@
+# A packaging line exposed over OPC UA: run it with
+#   fieldsim run examples/packaging_line.yaml
+# and browse opc.tcp://127.0.0.1:4840/ with any OPC UA client (UaExpert, asyncua, ...).
+# Node ids are ns=2;s=<dotted path>, e.g. ns=2;s=Line1.Speed.
+version: 1
+devices:
+  - name: packaging-line
+    protocol: opcua
+    port: 4840
+    namespace: urn:example:packaging
+    nodes:
+      - name: Line1
+        description: Main packaging line
+        nodes:
+          - name: Speed
+            type: Double
+            description: Belt speed in m/s
+            generator: { type: sine, min: 0.8, max: 1.2, period: 20s }
+          - name: Running
+            type: Boolean
+            value: true
+          - name: Setpoint
+            type: Int32
+            value: 120
+            writable: true
+          - name: Product
+            type: String
+            value: A-100
+            writable: true
+          - name: Counter
+            type: UInt32
+            generator: { type: ramp, start: 0, end: 100000, period: 1h, mode: once }
+      - name: Status
+        type: String
+        value: OK
+
+    scenario:
+      - { at: 30s, set: { Line1.Running: false, Status: "STOPPED: jam" } }
+      - { at: 40s, fault: { type: status, code: BadTimeout, services: [Read] }, duration: 5s }
+      - { at: 60s, offline: 10s }
+      - { at: 90s, set: { Line1.Running: true, Status: OK } }

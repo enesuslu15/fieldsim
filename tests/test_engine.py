@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 import pytest
@@ -79,10 +78,12 @@ async def test_failing_generator_is_logged_and_engine_survives(caplog):
 
     store = DictStore()
     gen = Flaky()
-    engine = GeneratorEngine(store, {"x": gen}, interval=0.005)
+    clock = VirtualClock()
+    engine = GeneratorEngine(store, {"x": gen}, interval=1, clock=clock)
     with caplog.at_level(logging.ERROR):
         engine.start()
-        await asyncio.sleep(0.05)
+        await clock.advance(5)
         await engine.stop()
     assert "generator tick failed" in caplog.text
-    assert gen.calls > 3
+    assert gen.calls == 6  # the start sample + 5 ticks, including the failing one
+    assert store.values["x"] == 6

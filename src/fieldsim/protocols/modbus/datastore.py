@@ -87,7 +87,7 @@ class ModbusDataStore:
         table: Table,
         name: str,
         address: int,
-        value: Value,
+        value: bool | int | float,
         reg: HoldingRegisterPoint | InputRegisterPoint | None = None,
         writable: bool = True,
     ) -> None:
@@ -129,11 +129,13 @@ class ModbusDataStore:
 
     def set(self, name: str, value: Value, *, clamp: bool = False) -> None:
         layout = self.point(name)
+        if isinstance(value, str):
+            raise TypeError(f"{name!r} is a Modbus point and cannot hold a string")
         if layout.data_type is not None:
             value = coerce(value, layout.data_type, clamp=clamp)
         self._store(layout, value)
 
-    def _store(self, layout: PointLayout, value: Value) -> None:
+    def _store(self, layout: PointLayout, value: bool | int | float) -> None:
         if layout.data_type is None:
             self._bits[layout.table][layout.address] = bool(value)
             return

@@ -57,6 +57,43 @@ def is_integer_type(data_type: RegisterType) -> bool:
     return data_type in INTEGER_RANGES
 
 
+def _coerce_integer(value: Number, lo: int, hi: int, clamp: bool, label: str) -> int:
+    if isinstance(value, float):
+        if math.isnan(value):
+            raise ValueError(f"NaN cannot be stored as {label}")
+        if math.isinf(value):
+            if not clamp:
+                raise ValueError(f"{value} cannot be stored as {label}")
+            return hi if value > 0 else lo
+        if clamp:
+            value = round(value)
+        elif not value.is_integer():
+            raise ValueError(f"{value} is not a whole number, but {label} requires one")
+        value = int(value)
+    if lo <= value <= hi:
+        return value
+    if clamp:
+        return max(lo, min(hi, value))
+    raise ValueError(f"{value} is out of range for {label} [{lo}, {hi}]")
+
+
+def _coerce_float(value: Number, single: bool, clamp: bool, label: str) -> float:
+    result = float(value)
+    if single and math.isfinite(result) and abs(result) > FLOAT32_MAX:
+        if clamp:
+            return math.copysign(FLOAT32_MAX, result)
+        raise ValueError(f"{value} is out of range for {label}")
+    return result
+
+
+def _as_number(value: object) -> Number:
+    if isinstance(value, bool):
+        return int(value)
+    if not isinstance(value, int | float):
+        raise TypeError(f"expected a number, got {type(value).__name__}")
+    return value
+
+
 def coerce(value: Number, data_type: RegisterType, *, clamp: bool = False) -> Number:
     """Validate ``value`` for ``data_type`` and return it in canonical form.
 
@@ -65,37 +102,71 @@ def coerce(value: Number, data_type: RegisterType, *, clamp: bool = False) -> Nu
     and out-of-range values are saturated to the type limits, the way a real
     device's ADC or scaling block would.
     """
-    if isinstance(value, bool):
-        value = int(value)
-    if not isinstance(value, int | float):
-        raise TypeError(f"expected a number, got {type(value).__name__}")
-
+    number = _as_number(value)
     if data_type in INTEGER_RANGES:
         lo, hi = INTEGER_RANGES[data_type]
-        if isinstance(value, float):
-            if math.isnan(value):
-                raise ValueError(f"NaN cannot be stored as {data_type}")
-            if math.isinf(value):
-                if not clamp:
-                    raise ValueError(f"{value} cannot be stored as {data_type}")
-                return hi if value > 0 else lo
-            if clamp:
-                value = round(value)
-            elif not value.is_integer():
-                raise ValueError(f"{value} is not a whole number, but {data_type} requires one")
-            value = int(value)
-        if lo <= value <= hi:
-            return value
-        if clamp:
-            return max(lo, min(hi, value))
-        raise ValueError(f"{value} is out of range for {data_type} [{lo}, {hi}]")
+        return _coerce_integer(number, lo, hi, clamp, data_type)
+    return _coerce_float(number, data_type == "float32", clamp, data_type)
 
-    result = float(value)
-    if data_type == "float32" and math.isfinite(result) and abs(result) > FLOAT32_MAX:
-        if clamp:
-            return math.copysign(FLOAT32_MAX, result)
-        raise ValueError(f"{value} is out of range for float32")
-    return result
+
+# --------------------------------------------------------------------------- OPC UA
+
+OpcUaType = Literal[
+    "Boolean",
+    "SByte",
+    "Byte",
+    "Int16",
+    "UInt16",
+    "Int32",
+    "UInt32",
+    "Int64",
+    "UInt64",
+    "Float",
+    "Double",
+    "String",
+]
+"""OPC UA built-in data types supported for variables."""
+
+OPCUA_INTEGER_RANGES: dict[str, tuple[int, int]] = {
+    "SByte": (-(2**7), 2**7 - 1),
+    "Byte": (0, 2**8 - 1),
+    "Int16": (-(2**15), 2**15 - 1),
+    "UInt16": (0, 2**16 - 1),
+    "Int32": (-(2**31), 2**31 - 1),
+    "UInt32": (0, 2**32 - 1),
+    "Int64": (-(2**63), 2**63 - 1),
+    "UInt64": (0, 2**64 - 1),
+}
+
+OpcUaValue = bool | int | float | str
+
+
+def opcua_default(data_type: OpcUaType) -> OpcUaValue:
+    """Initial value of a variable that has none configured."""
+    if data_type == "Boolean":
+        return False
+    if data_type == "String":
+        return ""
+    if data_type in ("Float", "Double"):
+        return 0.0
+    return 0
+
+
+def coerce_opcua(value: object, data_type: OpcUaType, *, clamp: bool = False) -> OpcUaValue:
+    """Like :func:`coerce`, for OPC UA data types (including Boolean and String)."""
+    if data_type == "String":
+        if not isinstance(value, str):
+            raise TypeError(f"expected a string, got {type(value).__name__}")
+        return value
+    if isinstance(value, str):
+        raise TypeError(f"expected a number for {data_type}, got a string")
+    if data_type == "Boolean":
+        return bool(value)
+    number = _as_number(value)
+    if data_type in OPCUA_INTEGER_RANGES:
+        lo, hi = OPCUA_INTEGER_RANGES[data_type]
+        return _coerce_integer(number, lo, hi, clamp, data_type)
+    return _coerce_float(number, data_type == "Float", clamp, data_type)
 
 
 def encode(

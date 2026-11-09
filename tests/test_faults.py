@@ -105,3 +105,10 @@ def test_active_fault_context_manager_and_clear():
     injector.add(parse_fault("drop"))
     injector.clear()
     assert injector.active == []
+
+
+def test_service_filter_and_status():
+    injector = FaultInjector([parse_fault("status", code="BadTimeout", services=["Read"])])
+    assert injector.plan(service="Write").clean
+    assert injector.plan(service="Read").status == "BadTimeout"
+    assert injector.plan(service=None).status == "BadTimeout"  # unknown service

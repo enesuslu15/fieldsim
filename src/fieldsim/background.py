@@ -29,8 +29,6 @@ from fieldsim.core.clock import Clock, RealClock, VirtualClock
 from fieldsim.core.datastore import Value
 from fieldsim.core.device import Device
 from fieldsim.core.faults import ActiveFault
-from fieldsim.protocols.modbus.datastore import WriteEvent
-from fieldsim.protocols.modbus.device import ModbusDevice
 from fieldsim.simulator import Simulator
 
 T = TypeVar("T")
@@ -39,6 +37,9 @@ ConfigSource = SimulationConfig | Mapping[str, Any] | str | Path
 ClockKind = Literal["real", "virtual"]
 
 CALL_TIMEOUT = 10.0
+#: Generous: the first OPC UA device of a process builds the standard address
+#: space, which takes tens of seconds under a coverage tracer.
+STARTUP_TIMEOUT = 120.0
 
 
 def resolve_config(source: ConfigSource) -> SimulationConfig:
@@ -85,7 +86,7 @@ class BackgroundSimulator:
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, timeout: float = CALL_TIMEOUT) -> None:
+    def start(self, timeout: float = STARTUP_TIMEOUT) -> None:
         if self._thread is not None:
             raise RuntimeError("simulator already started")
         ready = threading.Event()
@@ -265,7 +266,21 @@ class DeviceHandle:
 
     @property
     def unit_id(self) -> int:
+        """Modbus unit id clients should use."""
         return int(getattr(self.device, "unit_id", 1))
+
+    @property
+    def endpoint(self) -> str:
+        """OPC UA endpoint URL, e.g. ``opc.tcp://127.0.0.1:4840/``."""
+        if not hasattr(self.device, "endpoint"):
+            raise AttributeError(f"{self.protocol} devices have no OPC UA endpoint")
+        return str(self.device.endpoint)
+
+    def node_id(self, point: str) -> str:
+        """OPC UA node id string of a point, e.g. ``"ns=2;s=Line1.Speed"``."""
+        if not hasattr(self.device, "node_id"):
+            raise AttributeError(f"{self.protocol} devices have no OPC UA node ids")
+        return str(self._call(self.device.node_id, point))
 
     def _call(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         return self.simulator.call(fn, *args, **kwargs)  # type: ignore[no-any-return]
@@ -315,33 +330,22 @@ class DeviceHandle:
 
     # ------------------------------------------------------------------ writes
 
-    def _modbus(self) -> ModbusDevice:
-        if not isinstance(self.device, ModbusDevice):  # pragma: no cover - only Modbus so far
-            raise TypeError(f"{self.protocol} devices do not record writes")
-        return self.device
-
     @property
-    def writes(self) -> list[WriteEvent]:
+    def writes(self) -> list[Any]:
         """Snapshot of every client write recorded so far."""
-        device = self._modbus()
-        return self._call(lambda: list(device.writes))
+        return self._call(lambda: list(self.device.writes))
 
     def clear_writes(self) -> None:
-        self._call(self._modbus().clear_writes)
+        self._call(self.device.clear_writes)
 
-    def wait_for_write(self, point: str | None = None, timeout: float = 5.0) -> WriteEvent:
+    def wait_for_write(self, point: str | None = None, timeout: float = 5.0) -> Any:
         """Block until the next client write (touching ``point``).
 
-        See :meth:`fieldsim.protocols.modbus.ModbusDevice.wait_for_write`.
+        See :meth:`fieldsim.Device.wait_for_write`.
         """
-        result: WriteEvent = self.simulator.call(
-            self._modbus().wait_for_write, point, timeout, timeout=timeout + 5
-        )
-        return result
+        return self.simulator.call(self.device.wait_for_write, point, timeout, timeout=timeout + 5)
 
-    async def wait_for_write_async(
-        self, point: str | None = None, timeout: float = 5.0
-    ) -> WriteEvent:
+    async def wait_for_write_async(self, point: str | None = None, timeout: float = 5.0) -> Any:
         """:meth:`wait_for_write` for async tests: does not block the caller's event loop."""
         return await asyncio.to_thread(self.wait_for_write, point, timeout)
 

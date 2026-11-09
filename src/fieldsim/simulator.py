@@ -8,8 +8,9 @@ from types import TracebackType
 from typing import Any
 
 from fieldsim.config import (
-    DeviceSpec,
+    AnyDeviceSpec,
     ModbusDeviceSpec,
+    OpcUaDeviceSpec,
     SimulationConfig,
     load_config,
     parse_config,
@@ -18,12 +19,16 @@ from fieldsim.core.clock import Clock, RealClock
 from fieldsim.core.device import Device
 
 
-def create_device(spec: DeviceSpec, *, clock: Clock | None = None) -> Device[Any]:
+def create_device(spec: AnyDeviceSpec, *, clock: Clock | None = None) -> Device[Any]:
     """Instantiate the device class matching ``spec.protocol``."""
     if isinstance(spec, ModbusDeviceSpec):
         from fieldsim.protocols.modbus.device import ModbusDevice
 
         return ModbusDevice(spec, clock=clock)
+    if isinstance(spec, OpcUaDeviceSpec):
+        from fieldsim.protocols.opcua.device import OpcUaDevice
+
+        return OpcUaDevice(spec, clock=clock)
     raise TypeError(f"unsupported device spec: {type(spec).__name__}")  # pragma: no cover
 
 

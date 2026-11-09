@@ -38,6 +38,17 @@ DEFAULT_DEVICE: dict[str, Any] = {
     "port": 0,
     "unmapped": "allow",
 }
+DEFAULT_OPCUA_DEVICE: dict[str, Any] = {"name": "device", "protocol": "opcua", "port": 0}
+
+_FAMILIES = {
+    "modbus": ("Modbus", DEFAULT_DEVICE),
+    "opcua": ("OPC UA", DEFAULT_OPCUA_DEVICE),
+}
+
+
+def _family(protocol: str) -> str:
+    return "modbus" if protocol.startswith("modbus") else protocol
+
 
 MARKER_DOC = (
     "fieldsim(config=None, *, device=None, clock=None, free_ports=None): "
@@ -83,9 +94,7 @@ def _options(request: pytest.FixtureRequest) -> dict[str, Any]:
     if source is None:
         ini_path = request.config.getini("fieldsim_config")
         source = ini_path or None
-    if source is None:
-        source = {"devices": [DEFAULT_DEVICE]}
-    elif isinstance(source, str | Path):
+    if isinstance(source, str | Path):
         source = _find_file(request, source)
 
     free_ports = kwargs.get("free_ports")
@@ -103,7 +112,7 @@ def _start(source: ConfigSource, *, clock: Any, free_ports: bool) -> BackgroundS
     try:
         sim = BackgroundSimulator(source, clock=clock, free_ports=free_ports)
         sim.start()
-    except (ConfigError, ValueError) as exc:
+    except (ConfigError, ValueError, ImportError) as exc:
         pytest.fail(f"fieldsim: {exc}", pytrace=False)
     except OSError as exc:
         pytest.fail(f"fieldsim: cannot start devices: {exc}", pytrace=False)
@@ -114,24 +123,30 @@ def _start(source: ConfigSource, *, clock: Any, free_ports: bool) -> BackgroundS
 def fieldsim(request: pytest.FixtureRequest) -> Iterator[BackgroundSimulator]:
     """The running simulator with every device of the configured file."""
     options = _options(request)
-    sim = _start(options["config"], clock=options["clock"], free_ports=options["free_ports"])
+    source = options["config"] or {"devices": [DEFAULT_DEVICE]}
+    sim = _start(source, clock=options["clock"], free_ports=options["free_ports"])
     try:
         yield sim
     finally:
         sim.stop()
 
 
-@pytest.fixture
-def modbus_device(fieldsim: BackgroundSimulator, request: pytest.FixtureRequest) -> DeviceHandle:
-    """The Modbus device of the simulation (pick one with ``mark.fieldsim(device=...)``)."""
-    name = _options(request)["device"]
-    if name is not None:
-        return fieldsim[name]
-    candidates = [d for d in fieldsim if d.protocol.startswith("modbus")]
+def _single_device(request: pytest.FixtureRequest, family: str) -> DeviceHandle:
+    label, default = _FAMILIES[family]
+    options = _options(request)
+    if options["config"] is None and family != "modbus":
+        # Nothing configured: a stand-alone default device of the requested kind.
+        sim = _start({"devices": [default]}, clock=options["clock"], free_ports=True)
+        request.addfinalizer(sim.stop)
+        return sim[default["name"]]
+    fieldsim: BackgroundSimulator = request.getfixturevalue("fieldsim")
+    if options["device"] is not None:
+        return fieldsim[options["device"]]
+    candidates = [d for d in fieldsim if _family(d.protocol) == family]
     if len(candidates) != 1:
         names = ", ".join(d.name for d in candidates) or "none"
         pytest.fail(
-            f"fieldsim: modbus_device needs exactly one Modbus device, found: {names}. "
+            f"fieldsim: {family}_device needs exactly one {label} device, found: {names}. "
             "Choose one with @pytest.mark.fieldsim(device='...').",
             pytrace=False,
         )
@@ -139,19 +154,24 @@ def modbus_device(fieldsim: BackgroundSimulator, request: pytest.FixtureRequest)
 
 
 @pytest.fixture
-def make_modbus_device() -> Iterator[Callable[..., DeviceHandle]]:
-    """Factory for ad-hoc devices, cleaned up after the test::
+def modbus_device(request: pytest.FixtureRequest) -> DeviceHandle:
+    """The Modbus device of the simulation (pick one with ``mark.fieldsim(device=...)``)."""
+    return _single_device(request, "modbus")
 
-    def test_two_plcs(make_modbus_device):
-        a = make_modbus_device(registers={"coils": [{"name": "run", "address": 0}]})
-        b = make_modbus_device(protocol="modbus_rtu_over_tcp", unit_id=2)
-    """
+
+@pytest.fixture
+def opcua_device(request: pytest.FixtureRequest) -> DeviceHandle:
+    """The OPC UA device of the simulation; connect to ``opcua_device.endpoint``."""
+    return _single_device(request, "opcua")
+
+
+def _factory(default: Mapping[str, Any]) -> Iterator[Callable[..., DeviceHandle]]:
     started: list[BackgroundSimulator] = []
 
     def factory(
         spec: Mapping[str, Any] | None = None, *, clock: Any = "real", **fields: Any
     ) -> DeviceHandle:
-        device = {**DEFAULT_DEVICE, "name": f"device{len(started) + 1}", **(spec or {}), **fields}
+        device = {**default, "name": f"device{len(started) + 1}", **(spec or {}), **fields}
         sim = _start({"devices": [device]}, clock=clock, free_ports=True)
         started.append(sim)
         return sim[device["name"]]
@@ -161,3 +181,25 @@ def make_modbus_device() -> Iterator[Callable[..., DeviceHandle]]:
     finally:
         for sim in reversed(started):
             sim.stop()
+
+
+@pytest.fixture
+def make_modbus_device() -> Iterator[Callable[..., DeviceHandle]]:
+    """Factory for ad-hoc Modbus devices, cleaned up after the test::
+
+    def test_two_plcs(make_modbus_device):
+        a = make_modbus_device(registers={"coils": [{"name": "run", "address": 0}]})
+        b = make_modbus_device(protocol="modbus_rtu_over_tcp", unit_id=2)
+    """
+    yield from _factory(DEFAULT_DEVICE)
+
+
+@pytest.fixture
+def make_opcua_device() -> Iterator[Callable[..., DeviceHandle]]:
+    """Factory for ad-hoc OPC UA devices::
+
+    def test_line(make_opcua_device):
+        line = make_opcua_device(nodes=[{"name": "Speed", "type": "Double", "value": 1.5}])
+        client = Client(line.endpoint)
+    """
+    yield from _factory(DEFAULT_OPCUA_DEVICE)

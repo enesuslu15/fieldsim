@@ -144,3 +144,81 @@ def test_console_script_serves_until_terminated(tmp_path):
     finally:
         proc.kill()
         proc.wait(timeout=5)
+
+
+# --------------------------------------------------------------------------- init / check / --host
+
+
+@pytest.mark.parametrize("protocol", ["modbus", "opcua"])
+def test_init_writes_a_valid_file(tmp_path, protocol):
+    path = tmp_path / f"{protocol}.yaml"
+    result = runner.invoke(app, ["init", str(path), "--protocol", protocol])
+    assert result.exit_code == 0, result.output
+    assert "fieldsim run" in result.output
+    assert runner.invoke(app, ["validate", str(path)]).exit_code == 0
+
+
+def test_init_refuses_to_overwrite(tmp_path):
+    path = tmp_path / "x.yaml"
+    path.write_text("keep me", encoding="utf-8")
+    result = runner.invoke(app, ["init", str(path)])
+    assert result.exit_code == 1
+    assert "already exists" in result.output
+    assert path.read_text(encoding="utf-8") == "keep me"
+    assert runner.invoke(app, ["init", str(path), "--force"]).exit_code == 0
+    assert path.read_text(encoding="utf-8") != "keep me"
+
+
+def test_init_unknown_protocol(tmp_path):
+    result = runner.invoke(app, ["init", str(tmp_path / "x.yaml"), "-p", "profinet"])
+    assert result.exit_code != 0
+    assert "unknown protocol" in result.output
+
+
+def _listening_file(tmp_path, port):
+    path = tmp_path / "check.yaml"
+    path.write_text(
+        f"devices:\n  - {{name: plc, protocol: modbus_tcp, port: {port}}}\n", encoding="utf-8"
+    )
+    return path
+
+
+def test_check_succeeds_when_listening(tmp_path):
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        path = _listening_file(tmp_path, server.getsockname()[1])
+        result = runner.invoke(app, ["check", str(path)])
+    assert result.exit_code == 0, result.output
+    assert "OK    plc 127.0.0.1:" in result.output
+
+
+def test_check_fails_and_waits(tmp_path):
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    path = _listening_file(tmp_path, port)
+    start = time.monotonic()
+    result = runner.invoke(
+        app, ["check", str(path), "--wait", "0.5", "--timeout", "0.1", "--host", "0.0.0.0"]
+    )
+    assert result.exit_code == 1
+    assert "ERROR plc not reachable on 127.0.0.1" in result.output
+    assert time.monotonic() - start >= 0.5
+
+
+def test_run_host_override_and_opcua(tmp_path):
+    path = tmp_path / "mixed.yaml"
+    path.write_text(
+        "devices:\n"
+        "  - {name: plc, protocol: modbus_tcp, port: 0}\n"
+        "  - name: line\n    protocol: opcua\n    port: 0\n"
+        "    nodes: [{name: Speed, type: Double}]\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(
+        app, ["run", str(path), "--duration", "0.1", "--host", "0.0.0.0", "-l", "warning"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "0.0.0.0:" in result.output
+    assert "opc.tcp://127.0.0.1:" in result.output

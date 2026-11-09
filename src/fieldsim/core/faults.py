@@ -22,6 +22,7 @@ from fieldsim.config import (
     ExceptionFault,
     FaultSpec,
     LatencyFault,
+    StatusFault,
 )
 
 _FAULT_ADAPTER: TypeAdapter[FaultSpec] = TypeAdapter(FaultSpec)
@@ -48,6 +49,7 @@ class FaultPlan:
     execute: bool = True
     disconnect: bool = False
     exception: int | None = None
+    status: str | int | None = None
     corrupt: str | None = None
 
     @property
@@ -117,8 +119,12 @@ class FaultInjector:
     def clear(self) -> None:
         self._faults.clear()
 
-    def plan(self, function_code: int | None = None) -> FaultPlan:
-        """Roll the dice for one request and combine every fault that applies."""
+    def plan(self, function_code: int | None = None, service: str | None = None) -> FaultPlan:
+        """Roll the dice for one request and combine every fault that applies.
+
+        ``function_code`` (Modbus) and ``service`` (OPC UA) identify the request
+        for the faults' filters; ``None`` means "unknown" and matches any filter.
+        """
         plan = FaultPlan()
         for fault in list(self._faults):
             spec = fault.spec
@@ -127,6 +133,8 @@ class FaultInjector:
                 and function_code is not None
                 and function_code not in spec.function_codes
             ):
+                continue
+            if spec.services is not None and service is not None and service not in spec.services:
                 continue
             if spec.probability < 1 and self.rng.random() >= spec.probability:
                 continue
@@ -146,5 +154,7 @@ class FaultInjector:
             plan.disconnect = True
         elif isinstance(spec, ExceptionFault):
             plan.exception = spec.code
+        elif isinstance(spec, StatusFault):
+            plan.status = spec.code
         elif isinstance(spec, CorruptFault):
             plan.corrupt = spec.mode
