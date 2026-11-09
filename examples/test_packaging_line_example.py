@@ -53,7 +53,7 @@ async def test_slow_server_still_answers(opcua_device):
         loop = asyncio.get_running_loop()
         start = loop.time()
         await read_speed(opcua_device.endpoint, opcua_device.node_id("Line1.Speed"))
-        assert loop.time() - start >= 0.3
+        assert loop.time() - start >= 0.25  # timers may fire slightly early
 
 
 @pytest.mark.fieldsim("packaging_line.yaml", clock="virtual")

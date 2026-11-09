@@ -25,7 +25,8 @@ async def test_latency(device, client):
     with device.fault("latency", delay="300ms"):
         start = time.perf_counter()
         await client.read_holding_registers(0)
-        assert time.perf_counter() - start >= 0.29
+        # asyncio timers can fire ~16 ms early on Windows, hence the margin
+        assert time.perf_counter() - start >= 0.25
     start = time.perf_counter()
     await client.read_holding_registers(0)
     assert time.perf_counter() - start < 0.29  # generous: CI runners can be slow

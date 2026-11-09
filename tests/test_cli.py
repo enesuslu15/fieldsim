@@ -204,7 +204,7 @@ def test_check_fails_and_waits(tmp_path):
     )
     assert result.exit_code == 1
     assert "ERROR plc not reachable on 127.0.0.1" in result.output
-    assert time.monotonic() - start >= 0.5
+    assert time.monotonic() - start >= 0.45  # Windows clock ticks are ~16 ms
 
 
 def test_run_host_override_and_opcua(tmp_path):

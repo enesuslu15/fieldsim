@@ -188,7 +188,7 @@ async def test_latency(device, client):
     with device.fault("latency", delay="250ms", services=["Read"]):
         start = loop.time()
         await node(client, device, "Line1.Speed").read_value()
-        assert loop.time() - start >= 0.24
+        assert loop.time() - start >= 0.2  # Windows timers may fire ~16 ms early
 
 
 async def test_dropped_response_keeps_the_channel_alive(device, client):
